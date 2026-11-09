@@ -1,0 +1,4 @@
+SOURCE: CMS-style MLR extract (SYNTHETIC demonstration data)
+Published: 2026-10-14
+entity,metric,value,unit,period
+Halcyon Health,mlr_pct,85.0,percent,2026-Q3

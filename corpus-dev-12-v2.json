@@ -1,0 +1,490 @@
+{
+  "meta": {
+    "name": "dev corpus (same-author, 12 cases)",
+    "created": "2026-11-09",
+    "author": "Karan Kapur (same author as the SOP and implementation - not independent evaluation)",
+    "caveat": "I wrote the rule pack, this dev set, and the graded holdout myself. Freezing the holdout before the implementation was finished prevents answer-tuning, but same-author tests are not independent evaluation. The 'document' field is the only part the extractor sees. The graded 33-case holdout is kept out of this repo on purpose; happy to share it directly.",
+    "semantics": "decision is mutually exclusive (apply/hold/reject); flags are overlapping annotations; expected decisions are derivable from rule-pack.md alone and were re-derived through reconcile.decide by make_corpora.py.",
+    "entities": {
+      "canonical": [
+        "Halcyon Health",
+        "Corvian Medical",
+        "Bexar Therapeutics"
+      ],
+      "aliases": {
+        "Halcyon Health": [
+          "Halcyon",
+          "Halcyon Health, Inc."
+        ],
+        "Corvian Medical": [
+          "Corvian"
+        ],
+        "Bexar Therapeutics": [
+          "Bexar"
+        ]
+      }
+    },
+    "metrics": [
+      "ebitda_margin_pct",
+      "ma_enrollment",
+      "medicaid_enrollment",
+      "mlr_pct",
+      "premium_revenue_musd",
+      "rd_spend_musd",
+      "star_rating"
+    ],
+    "tally": {
+      "apply": 5,
+      "hold": 6,
+      "reject": 1
+    }
+  },
+  "scenarios": [
+    {
+      "id": "D01",
+      "batch": "d1",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "tracked": true,
+        "current": {
+          "value": 1250000,
+          "unit": "members",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "SOURCE: CMS-style enrollment extract (SYNTHETIC demonstration data)\nPublished: 2026-10-01\nentity,metric,value,unit,period\nHalcyon Health,ma_enrollment,1298000,members,2026-Q3",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "value": 1298000,
+        "unit": "members",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-01",
+        "source_type": "government_data",
+        "source_id": "SRC-GOV-D01",
+        "citation": {
+          "present": true,
+          "locator": "row 2 (Halcyon Health), column value"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "apply",
+        "reason_code": "authoritative_newer_consistent",
+        "flags": []
+      }
+    },
+    {
+      "id": "D02",
+      "batch": "d2",
+      "record": {
+        "entity": "Bexar Therapeutics",
+        "metric": "ebitda_margin_pct",
+        "tracked": true,
+        "current": {
+          "value": 18.0,
+          "unit": "percent",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "company_filing"
+        }
+      },
+      "document": "Bexar Therapeutics quarterly report (SYNTHETIC), published 2026-10-09.\nEBITDA margin for 2026-Q3 came in at 18.9% (page 2, 'Profitability').",
+      "expected_candidate": {
+        "entity": "Bexar Therapeutics",
+        "metric": "ebitda_margin_pct",
+        "value": 18.9,
+        "unit": "percent",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-09",
+        "source_type": "company_filing",
+        "source_id": "SRC-CO-D02",
+        "citation": {
+          "present": true,
+          "locator": "page 2, 'Profitability'"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "apply",
+        "reason_code": "authoritative_newer_consistent",
+        "flags": []
+      }
+    },
+    {
+      "id": "D03",
+      "batch": "d3",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "medicaid_enrollment",
+        "tracked": false,
+        "current": null
+      },
+      "document": "News brief (SYNTHETIC), published 2026-10-24.\nHalcyon Health's Medicaid enrollment reached 405,000 members in Q3 2026,\naccording to the item's third paragraph.",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "medicaid_enrollment",
+        "value": 405000,
+        "unit": "members",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-24",
+        "source_type": "news",
+        "source_id": "SRC-NEWS-D03",
+        "citation": {
+          "present": true,
+          "locator": "paragraph 3"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "apply",
+        "reason_code": "new_coverage",
+        "flags": [
+          "low_authority"
+        ]
+      }
+    },
+    {
+      "id": "D04",
+      "batch": "d4",
+      "record": {
+        "entity": "Corvian Medical",
+        "metric": "mlr_pct",
+        "tracked": true,
+        "current": {
+          "value": 86.0,
+          "unit": "percent",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "NAIC-style quarterly statement for Corvian Medical (SYNTHETIC), filed 2026-10-17.\nMedical loss ratio for 2026-Q3: 86.6% (schedule H, line 12).",
+      "expected_candidate": {
+        "entity": "Corvian Medical",
+        "metric": "mlr_pct",
+        "value": 86.6,
+        "unit": "percent",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-17",
+        "source_type": "regulatory_filing",
+        "source_id": "SRC-REG-D04",
+        "citation": {
+          "present": true,
+          "locator": "schedule H, line 12"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "apply",
+        "reason_code": "authoritative_newer_consistent",
+        "flags": []
+      }
+    },
+    {
+      "id": "D05",
+      "batch": "d5",
+      "record": {
+        "entity": "Corvian Medical",
+        "metric": "star_rating",
+        "tracked": true,
+        "current": {
+          "value": 3.5,
+          "unit": "stars",
+          "as_of": "2026-03-31",
+          "period": "2026-Q1",
+          "source_type": "government_data"
+        }
+      },
+      "document": "CMS-style ratings release (SYNTHETIC), published 2026-10-06.\nCorvian Medical: overall star rating 3.5 stars for 2026-Q3 (release table,\nrow 9).",
+      "expected_candidate": {
+        "entity": "Corvian Medical",
+        "metric": "star_rating",
+        "value": 3.5,
+        "unit": "stars",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-06",
+        "source_type": "government_data",
+        "source_id": "SRC-GOV-D05",
+        "citation": {
+          "present": true,
+          "locator": "release table, row 9"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "apply",
+        "reason_code": "authoritative_newer_consistent",
+        "flags": []
+      }
+    },
+    {
+      "id": "D06",
+      "batch": "d6",
+      "record": {
+        "entity": "Bexar Therapeutics",
+        "metric": "rd_spend_musd",
+        "tracked": true,
+        "current": {
+          "value": 610,
+          "unit": "musd",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "company_filing"
+        }
+      },
+      "document": "News brief (SYNTHETIC), published 2026-06-20.\nBexar Therapeutics R&D spend for 2026-Q2 was $600 million, the item says in\nparagraph 2.",
+      "expected_candidate": {
+        "entity": "Bexar Therapeutics",
+        "metric": "rd_spend_musd",
+        "value": 600,
+        "unit": "musd",
+        "period": "2026-Q2",
+        "pub_date": "2026-06-20",
+        "source_type": "news",
+        "source_id": "SRC-NEWS-D06",
+        "citation": {
+          "present": true,
+          "locator": "paragraph 2"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "stale_source",
+        "flags": []
+      }
+    },
+    {
+      "id": "D07",
+      "batch": "d7",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "mlr_pct",
+        "tracked": true,
+        "current": {
+          "value": 84.2,
+          "unit": "percent",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "CMS-style release (SYNTHETIC), published 2026-10-27.\nHalcyon Health MLR for 2026-Q3: 83.9%. Note: methodology change - rebates are\nnow netted against premiums (release notes, section 2).",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "mlr_pct",
+        "value": 83.9,
+        "unit": "percent",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-27",
+        "source_type": "government_data",
+        "source_id": "SRC-GOV-D07",
+        "citation": {
+          "present": true,
+          "locator": "release notes, section 2"
+        },
+        "unit_or_definition_change": true
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "unit_or_definition_change",
+        "flags": []
+      }
+    },
+    {
+      "id": "D08",
+      "batch": "d8",
+      "record": {
+        "entity": "Corvian Medical",
+        "metric": "ma_enrollment",
+        "tracked": true,
+        "current": {
+          "value": 96000,
+          "unit": "members",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "Corvian Medical company update (SYNTHETIC), published 2026-10-23.\nMA enrollment stood at 140,000 members for 2026-Q3 (page 1, highlights).",
+      "expected_candidate": {
+        "entity": "Corvian Medical",
+        "metric": "ma_enrollment",
+        "value": 140000,
+        "unit": "members",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-23",
+        "source_type": "company_filing",
+        "source_id": "SRC-CO-D08",
+        "citation": {
+          "present": true,
+          "locator": "page 1, highlights"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "large_delta",
+        "flags": [
+          "low_authority_override"
+        ]
+      }
+    },
+    {
+      "id": "D09",
+      "batch": "d9",
+      "record": {
+        "entity": "Bexar Therapeutics",
+        "metric": "ebitda_margin_pct",
+        "tracked": true,
+        "current": {
+          "value": 18.0,
+          "unit": "percent",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "company_filing"
+        }
+      },
+      "document": "News brief (SYNTHETIC), published 2026-10-29.\nBexar Therapeutics EBITDA margin slipped to 15.2% in Q3 2026 (paragraph 1).",
+      "expected_candidate": {
+        "entity": "Bexar Therapeutics",
+        "metric": "ebitda_margin_pct",
+        "value": 15.2,
+        "unit": "percent",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-29",
+        "source_type": "news",
+        "source_id": "SRC-NEWS-D09",
+        "citation": {
+          "present": true,
+          "locator": "paragraph 1"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "low_authority_override",
+        "flags": [
+          "low_authority_override"
+        ]
+      }
+    },
+    {
+      "id": "D10",
+      "batch": "d10",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "premium_revenue_musd",
+        "tracked": true,
+        "current": {
+          "value": 2150,
+          "unit": "musd",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "company_filing"
+        }
+      },
+      "document": "Analyst spreadsheet note (SYNTHETIC), dated 2026-10-10.\nHalcyon Health premium revenue for 2026-Q3 entered as 2260 ($m). No source\nreference was included.",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "premium_revenue_musd",
+        "value": 2260,
+        "unit": "musd",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-10",
+        "source_type": "analyst_spreadsheet",
+        "source_id": "SRC-AN-D10",
+        "citation": {
+          "present": false,
+          "locator": ""
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "reject",
+        "reason_code": "missing_citation",
+        "flags": []
+      }
+    },
+    {
+      "id": "D11",
+      "batch": "d11",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "tracked": true,
+        "current": {
+          "value": 1250000,
+          "unit": "members",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "NAIC-style statement for Halcyon Health (SYNTHETIC), filed 2026-10-30.\nMA enrollment for 2026-Q3: 1,300,000 members (schedule T, page 7).",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "value": 1300000,
+        "unit": "members",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-30",
+        "source_type": "regulatory_filing",
+        "source_id": "SRC-REG-D11",
+        "citation": {
+          "present": true,
+          "locator": "schedule T, page 7"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "conflicting_sources",
+        "flags": []
+      }
+    },
+    {
+      "id": "D12",
+      "batch": "d11",
+      "record": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "tracked": true,
+        "current": {
+          "value": 1250000,
+          "unit": "members",
+          "as_of": "2026-06-30",
+          "period": "2026-Q2",
+          "source_type": "regulatory_filing"
+        }
+      },
+      "document": "News brief (SYNTHETIC), published 2026-10-30.\nHalcyon Health MA enrollment hit 1,460,000 members in Q3 2026 (paragraph 2).",
+      "expected_candidate": {
+        "entity": "Halcyon Health",
+        "metric": "ma_enrollment",
+        "value": 1460000,
+        "unit": "members",
+        "period": "2026-Q3",
+        "pub_date": "2026-10-30",
+        "source_type": "news",
+        "source_id": "SRC-NEWS-D12",
+        "citation": {
+          "present": true,
+          "locator": "paragraph 2"
+        },
+        "unit_or_definition_change": false
+      },
+      "expected": {
+        "decision": "hold",
+        "reason_code": "conflicting_sources",
+        "flags": [
+          "low_authority_override"
+        ]
+      }
+    }
+  ]
+}

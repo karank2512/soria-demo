@@ -1,0 +1,4 @@
+SOURCE: CMS-style enrollment extract (SYNTHETIC demonstration data)
+Published: 2026-10-01
+entity,metric,value,unit,period
+Halcyon Health,ma_enrollment,1312000,members,2026-Q3

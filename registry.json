@@ -1,0 +1,21 @@
+{
+  "Halcyon Health": {
+    "aliases": [
+      "Halcyon",
+      "Halcyon Health, Inc."
+    ],
+    "kind": "payer"
+  },
+  "Corvian Medical": {
+    "aliases": [
+      "Corvian"
+    ],
+    "kind": "hospital chain"
+  },
+  "Bexar Therapeutics": {
+    "aliases": [
+      "Bexar"
+    ],
+    "kind": "pharma"
+  }
+}

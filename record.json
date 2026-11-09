@@ -1,0 +1,77 @@
+{
+  "meta": {
+    "name": "Meridian Research sector record (SYNTHETIC demonstration data)",
+    "created": "2026-11-09",
+    "note": "All entities and values are fictional. Every value carries its source."
+  },
+  "entities": {
+    "Halcyon Health": {
+      "metrics": {
+        "ma_enrollment": {
+          "value": 1250000, "unit": "members", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "regulatory_filing", "source_id": "SRC-SEED-01",
+                     "pub_date": "2026-08-15",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        },
+        "mlr_pct": {
+          "value": 84.2, "unit": "percent", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "regulatory_filing", "source_id": "SRC-SEED-02",
+                     "pub_date": "2026-08-15",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        },
+        "premium_revenue_musd": {
+          "value": 2150, "unit": "musd", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "company_filing", "source_id": "SRC-SEED-03",
+                     "pub_date": "2026-08-01",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        }
+      }
+    },
+    "Corvian Medical": {
+      "metrics": {
+        "ma_enrollment": {
+          "value": 96000, "unit": "members", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "regulatory_filing", "source_id": "SRC-SEED-04",
+                     "pub_date": "2026-08-12",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        },
+        "mlr_pct": {
+          "value": 86.0, "unit": "percent", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "regulatory_filing", "source_id": "SRC-SEED-05",
+                     "pub_date": "2026-08-12",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        },
+        "star_rating": {
+          "value": 3.5, "unit": "stars", "period": "2026-Q1",
+          "as_of": "2026-03-31",
+          "source": {"type": "government_data", "source_id": "SRC-SEED-06",
+                     "pub_date": "2026-04-20",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        }
+      }
+    },
+    "Bexar Therapeutics": {
+      "metrics": {
+        "ebitda_margin_pct": {
+          "value": 18.0, "unit": "percent", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "company_filing", "source_id": "SRC-SEED-07",
+                     "pub_date": "2026-08-05",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        },
+        "rd_spend_musd": {
+          "value": 610, "unit": "musd", "period": "2026-Q2",
+          "as_of": "2026-06-30",
+          "source": {"type": "company_filing", "source_id": "SRC-SEED-08",
+                     "pub_date": "2026-08-05",
+                     "citation": {"present": true, "locator": "seed record, synthetic"}}
+        }
+      }
+    }
+  }
+}

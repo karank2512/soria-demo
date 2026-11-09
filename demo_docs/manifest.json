@@ -1,0 +1,8 @@
+[
+  {"id": "DEMO1", "file": "demo1.txt", "batch": "demo-2026-Q3", "source_id": "SRC-GOV-DEMO1"},
+  {"id": "DEMO2", "file": "demo2.txt", "batch": "demo-2026-Q3", "source_id": "SRC-GOV-DEMO2"},
+  {"id": "DEMO3", "file": "demo3.txt", "batch": "demo-2026-Q3", "source_id": "SRC-NEWS-DEMO3"},
+  {"id": "DEMO4", "file": "demo4.txt", "batch": "demo-2026-Q3", "source_id": "SRC-NEWS-DEMO4"},
+  {"id": "DEMO5", "file": "demo5.txt", "batch": "demo-2026-Q3", "source_id": "SRC-CO-DEMO5"},
+  {"id": "DEMO6", "file": "demo6.txt", "batch": "demo-2026-Q3", "source_id": "SRC-NEWS-DEMO6"}
+]
