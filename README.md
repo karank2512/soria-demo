@@ -33,7 +33,7 @@ Requires Python 3.9+ (standard library only). The extraction steps need the
 `claude` CLI; everything else runs without it.
 
 ```
-python3 -m unittest -v                                  # 15 tests
+python3 -m unittest -v                                  # 19 tests
 python3 run_demo.py --mode mock --outdir out-demo       # no model calls
 open out-demo/review.html                               # the page above
 
@@ -45,7 +45,7 @@ python3 run_holdout.py --corpus corpus-dev-12-v2.json --mode claude --outdir out
 
 | Suite | Result |
 | --- | --- |
-| Unit tests | 15/15 pass |
+| Unit tests | 19/19 pass |
 | Dev set (12 cases, real extraction) | 12/12 decisions, 0 wrong auto-applies |
 | Frozen holdout (33 cases, run once after code freeze) | 33/33 decisions (14 applied / 14 held / 5 rejected), 0 wrong auto-applies |
 
@@ -67,13 +67,20 @@ extract_candidate.py  LLM extractor wrapper (claude CLI)
 run_holdout.py        corpus harness + scorer
 run_demo.py           end-to-end demo runner
 review_page.py        renders the review surface (HTML)
-test_reconcile.py     15 unit tests
+test_reconcile.py     19 unit tests
 record.json           seed record (synthetic)
 registry.json         entity registry with aliases
 corpus-dev-12-v2.json dev test set (same-author)
 demo_docs/            six curated synthetic source updates
 docs/                 write-up and screenshot
 ```
+
+## Provenance
+
+The demo was evaluated on 2026-11-09 (results above) before this repo was
+assembled; the repo adds input-validation hardening on top of the evaluated
+code, with decision logic unchanged and the full suite re-run. The two commits
+show the difference.
 
 ## Limitations
 

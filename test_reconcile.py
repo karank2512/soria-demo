@@ -117,6 +117,34 @@ class TestBatches(unittest.TestCase):
                          ("apply", "authoritative_newer_consistent"))
 
 
+class TestHardening(unittest.TestCase):
+    def test_unknown_source_type_rejected(self):
+        c = cand(source_type="blog")
+        r = decide(REGISTRY, rec(), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("reject", "invalid_candidate"))
+        self.assertIn("source_type", r["error"])
+
+    def test_missing_key_rejected(self):
+        c = cand()
+        del c["value"]
+        r = decide(REGISTRY, rec(), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("reject", "invalid_candidate"))
+
+    def test_bad_pubdate_rejected(self):
+        c = cand(pub_date="last Tuesday")
+        r = decide(REGISTRY, rec(), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("reject", "invalid_candidate"))
+
+    def test_nonnumeric_value_rejected(self):
+        c = cand(value="about 1.3 million")
+        r = decide(REGISTRY, rec(), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("reject", "invalid_candidate"))
+
+
 class TestApply(unittest.TestCase):
     def test_authoritative_apply(self):
         c = cand()

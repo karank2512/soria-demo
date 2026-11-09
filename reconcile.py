@@ -47,6 +47,33 @@ def _date(s):
     return datetime.date.fromisoformat(s)
 
 
+CANDIDATE_REQUIRED = ["entity", "metric", "value", "unit", "period",
+                      "pub_date", "source_type", "citation"]
+
+
+def candidate_error(candidate):
+    """Return a short error string for a malformed candidate, else None.
+
+    Hardening only: well-formed candidates (every corpus case) never hit this.
+    """
+    if not isinstance(candidate, dict):
+        return "candidate is not an object"
+    for k in CANDIDATE_REQUIRED:
+        if k not in candidate:
+            return "missing key: %s" % k
+    if candidate["source_type"] not in AUTHORITY_RANK:
+        return "unknown source_type: %r" % candidate["source_type"]
+    try:
+        float(candidate["value"])
+    except (TypeError, ValueError):
+        return "value is not numeric: %r" % candidate["value"]
+    try:
+        _date(str(candidate["pub_date"]))
+    except ValueError:
+        return "pub_date is not ISO: %r" % candidate["pub_date"]
+    return None
+
+
 def resolve_entity(registry, name):
     """Return (canonical_name, known_bool). Case-insensitive; checks aliases."""
     if not name:
@@ -95,6 +122,10 @@ def decide(registry, record_entry, candidate, batch):
     Returns {"decision", "reason_code", "flags", "canonical_entity"}.
     """
     flags = []
+    err = candidate_error(candidate)
+    if err:
+        return {"decision": "reject", "reason_code": "invalid_candidate",
+                "flags": flags, "canonical_entity": None, "error": err}
     canon, known = resolve_entity(registry, candidate.get("entity"))
     if not known:
         return {"decision": "reject", "reason_code": "unknown_entity",
@@ -191,9 +222,16 @@ def main(argv=None):
     ap.add_argument("--report", required=True)
     args = ap.parse_args(argv)
 
-    registry = load_json(args.registry)
-    record = load_json(args.record)
-    candidates = load_json(args.candidates)
+    try:
+        registry = load_json(args.registry)
+        record = load_json(args.record)
+        candidates = load_json(args.candidates)
+    except (OSError, json.JSONDecodeError) as e:
+        print("error loading inputs: %s" % e, file=sys.stderr)
+        return 2
+    if not isinstance(candidates, list):
+        print("error: candidates file must be a JSON list", file=sys.stderr)
+        return 2
 
     # Group candidates by batch, preserving order.
     batches = {}
