@@ -99,6 +99,46 @@ class TestInit(WSBase):
         self.assertIn("finite number", err)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "ws2")))
 
+    def test_bad_init_inputs_give_clean_errors(self):
+        a_file = os.path.join(self.tmp, "afile")
+        open(a_file, "w").close()
+        rc, _, err = run("init", a_file)
+        self.assertEqual(rc, 2)
+        self.assertIn("not a directory", err)
+        for aliases in (None, "abc", [1]):
+            reg = os.path.join(self.tmp, "reg.json")
+            with open(reg, "w") as f:
+                json.dump({"A": {"aliases": aliases}}, f)
+            rc, _, err = run("init", os.path.join(self.tmp, "w3"), "--registry", reg)
+            self.assertEqual(rc, 2, aliases)
+            self.assertIn("aliases must be a list of strings", err)
+        rc, _, err = run("init", os.path.join(self.tmp, "w4"), "--record", self.tmp)
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot read", err)
+        rc, _, err = run("ingest", self.ws, "--candidates", self.write_cands([cand()]),
+                         "--manifest", self.tmp)
+        self.assertEqual(rc, 2)
+
+    def test_reconcile_cli_refuses_malformed_record_and_registry(self):
+        import reconcile
+        bad_rec = os.path.join(self.tmp, "bad_rec.json")
+        with open(bad_rec, "w") as f:
+            json.dump({"entities": {"Halcyon Health": {"metrics": {
+                "ma_enrollment": {"value": 1, "unit": "members"}}}}}, f)  # no as_of
+        bad_reg = os.path.join(self.tmp, "bad_reg.json")
+        with open(bad_reg, "w") as f:
+            json.dump(["not", "an", "object"], f)
+        cands = self.write_cands([cand()])
+        for rec, reg in ((bad_rec, REGISTRY), (SEED_RECORD, bad_reg)):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = reconcile.main(["--record", rec, "--registry", reg, "--candidates", cands,
+                                     "--audit", os.path.join(self.tmp, "a.jsonl"),
+                                     "--record-out", os.path.join(self.tmp, "r.json"),
+                                     "--report", os.path.join(self.tmp, "rep.md")])
+            self.assertEqual(rc, 2)
+            self.assertIn("not usable", err.getvalue())
+
     def test_commands_on_missing_workspace_fail_cleanly(self):
         rc, _, err = run("queue", os.path.join(self.tmp, "nope"))
         self.assertEqual(rc, 2)
@@ -196,6 +236,42 @@ class TestIngestAndQueue(WSBase):
         self.assertEqual(rc, 2)
         self.assertIn("does not exist", err)
 
+    def test_rejected_junk_still_renders(self):
+        junk = [cand(batch="j", metric=["a"]), cand(batch="j", value=float("nan")),
+                cand(batch="j", value=10 ** 400), cand(batch="j", citation=[1]),
+                cand(batch="j", source_type=["x"], unit={"u": 1}), 5]
+        rc, _, err = run("ingest", self.ws, "--candidates", self.write_cands(junk))
+        self.assertEqual(rc, 0, err)
+        out_path = os.path.join(self.tmp, "r.html")
+        rc, _, err = run("render", self.ws, "--out", out_path)
+        self.assertEqual(rc, 0, err)
+        with open(out_path, encoding="utf-8") as f:
+            page = f.read()
+        self.assertIn("Rejected outright (6)", page)
+
+    def test_non_object_candidate_does_not_consume_a_batch_id(self):
+        run("ingest", self.ws, "--candidates", self.write_cands([5, cand(batch="b1")]))
+        rc, _, err = run("ingest", self.ws, "--candidates",
+                         self.write_cands([7, cand(batch="b2")], "c2.json"))
+        self.assertEqual(rc, 0, err)
+
+    def test_malformed_source_id_with_manifest_rejected_cleanly(self):
+        c = cand(source_id=["x"], batch="zz")
+        rc, out, err = run("ingest", self.ws, "--candidates", self.write_cands([c]),
+                           "--manifest", MANIFEST)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.audit()[0]["reason_code"], "invalid_candidate")
+
+    def test_render_refuses_to_overwrite_workspace_data(self):
+        before = self.state()
+        for name in ("audit.jsonl", "record.json", "workspace.json", "registry.json"):
+            rc, _, err = run("render", self.ws, "--out", os.path.join(self.ws, name))
+            self.assertEqual(rc, 2, name)
+            self.assertIn("refusing", err)
+        rc, _, err = run("render", self.ws, "--out", self.ws)
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.state(), before)
+
     def test_value_missing_from_source_document_is_held(self):
         docs = os.path.join(self.tmp, "docs")
         os.makedirs(docs)
@@ -265,6 +341,10 @@ class TestResolve(WSBase):
         self.assertEqual(rc, 0, err)
         self.assertTrue(self.audit()[-1]["forced_over_change"])
         self.assertEqual(self.record_value("Halcyon Health", "mlr_pct")["value"], 88.6)
+        out_path = os.path.join(self.tmp, "forced.html")
+        run("render", self.ws, "--out", out_path)
+        with open(out_path, encoding="utf-8") as f:
+            self.assertIn("forced: record had changed since the hold", f.read())
 
     def test_render_shows_only_open_holds_and_logs_resolution(self):
         run("resolve", self.ws, "D-2", "--accept", "--reviewer", "analyst-a",

@@ -313,6 +313,53 @@ def decide(registry, record_entry, candidate, batch, source_text=None):
             "flags": flags, "canonical_entity": canon}
 
 
+def record_problems(record):
+    """Return a list of problems with a record file (empty when usable)."""
+    problems = []
+    if not isinstance(record, dict) or not isinstance(record.get("entities"), dict):
+        return ["record must be an object with an 'entities' object"]
+    for ent, edata in record["entities"].items():
+        metrics = edata.get("metrics") if isinstance(edata, dict) else None
+        if not isinstance(metrics, dict):
+            problems.append("%s: 'metrics' must be an object" % ent)
+            continue
+        for metric, m in metrics.items():
+            where = "%s / %s" % (ent, metric)
+            if not isinstance(m, dict):
+                problems.append("%s: entry must be an object" % where)
+                continue
+            if not is_finite_number(m.get("value")):
+                problems.append("%s: value must be a finite number" % where)
+            for k in ("unit", "as_of"):
+                if not isinstance(m.get(k), str):
+                    problems.append("%s: %s must be a string" % (where, k))
+            try:
+                _date(m.get("as_of", ""))
+            except (TypeError, ValueError):
+                problems.append("%s: as_of must be an ISO date" % where)
+            src = m.get("source")
+            st = src.get("type") if isinstance(src, dict) else None
+            if st not in AUTHORITY_RANK:
+                problems.append("%s: source.type must be one of %s"
+                                % (where, ", ".join(AUTHORITY_RANK)))
+    return problems
+
+
+def registry_problems(registry):
+    """Return a list of problems with a registry file (empty when usable)."""
+    if not isinstance(registry, dict) or not registry:
+        return ["registry must be a non-empty object"]
+    problems = []
+    for name, info in registry.items():
+        if not isinstance(info, dict):
+            problems.append("%s: entry must be an object" % name)
+            continue
+        aliases = info.get("aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+            problems.append("%s: aliases must be a list of strings" % name)
+    return problems
+
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -362,7 +409,9 @@ def batch_id_of(cand):
 
     Integer ids are kept distinct (1 and 2 are two batches) as before.
     """
-    b = cand.get("batch", "default") if isinstance(cand, dict) else "default"
+    if not isinstance(cand, dict):
+        return None  # a non-object never claims a batch id
+    b = cand.get("batch", "default")
     if isinstance(b, int) and not isinstance(b, bool):
         return str(b)
     if isinstance(b, str) and b.strip():
@@ -397,14 +446,19 @@ def reconcile_batches(registry, record, candidates, source_texts=None):
     def text_for(cand):
         if source_texts is None or not isinstance(cand, dict):
             return None
-        return source_texts.get(cand.get("source_id"), SOURCE_MISSING)
+        sid = cand.get("source_id")
+        if sid is not None and not isinstance(sid, str):
+            return None  # malformed: decide() rejects it as invalid_candidate
+        return source_texts.get(sid, SOURCE_MISSING)
 
     decisions = []
     for cand in bad_batch:
         decisions.append({"batch": "invalid", "candidate": cand, "prior": None, "result": {
             "decision": "reject", "reason_code": "invalid_candidate", "flags": [],
             "canonical_entity": None,
-            "error": "batch must be a non-empty string or integer: %r" % (cand.get("batch"),)}})
+            "error": ("candidate is not an object" if not isinstance(cand, dict) else
+                      "batch must be a non-empty string or integer: %r"
+                      % (cand.get("batch"),))}})
     for batch_id, group in batches.items():
         # Only candidates whose value is confirmed by their own document may
         # act as peers (a fabricated value must not outrank a verified one).
@@ -525,14 +579,16 @@ def main(argv=None):
         registry = load_json(args.registry)
         record = load_json(args.record)
         candidates = load_json(args.candidates)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         print("error loading inputs: %s" % e, file=sys.stderr)
         return 2
     if not isinstance(candidates, list):
         print("error: candidates file must be a JSON list", file=sys.stderr)
         return 2
-    if not isinstance(record, dict) or not isinstance(record.get("entities"), dict):
-        print("error: record must be an object with an 'entities' object", file=sys.stderr)
+    problems = record_problems(record) + registry_problems(registry)
+    if problems:
+        print("error: input files are not usable:\n  " + "\n  ".join(problems),
+              file=sys.stderr)
         return 2
 
     decisions, record = reconcile_batches(registry, record, candidates)

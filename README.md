@@ -33,7 +33,7 @@ Requires Python 3.9+ (standard library only). The extraction steps need the
 `claude` CLI; everything else runs without it.
 
 ```
-python3 -m unittest -v                                  # 74 tests
+python3 -m unittest -v                                  # 80 tests
 python3 run_demo.py --mode mock --outdir out-demo       # no model calls
 open out-demo/review.html                               # the page above
 
@@ -67,7 +67,10 @@ python3 workspace.py status ws-demo
   add `--force`; forced accepts are marked in the log.
 - Later ingests are decided against the record as it stands, in batch order.
   Every candidate needs a batch id (field, manifest, or `--batch NAME`); a
-  batch id or an exact file that was already ingested is refused.
+  batch id or an exact file that was already ingested is refused. A batch id
+  is used up once ingested, even if every candidate in it was rejected:
+  resubmit corrections under a new id. Integer and string ids are the same
+  (`1` and `"1"` are one batch).
 - With `--manifest`, each candidate's value is checked against its source
   document text; a value the document never states is held
   (`value_not_in_source`), and a candidate whose source is not in the
@@ -83,7 +86,7 @@ tamper-proofing.
 
 | Suite | Result |
 | --- | --- |
-| Unit tests | 74/74 pass |
+| Unit tests | 80/80 pass |
 | Dev set (12 cases, real extraction) | 12/12 decisions, 0 wrong auto-applies |
 | Frozen holdout (33 cases, run once after code freeze) | 33/33 decisions (14 applied / 14 held / 5 rejected), 0 wrong auto-applies |
 

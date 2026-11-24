@@ -12,6 +12,7 @@ All data is synthetic and labeled as such.
 
 import argparse
 import html
+import math
 import json
 
 DECISION_LABEL = {"apply": "Applied", "hold": "Held for review", "reject": "Rejected"}
@@ -47,16 +48,20 @@ def esc(s):
 
 
 def metric_label(key):
-    if key in METRIC_LABEL:
+    if isinstance(key, str) and key in METRIC_LABEL:
         return METRIC_LABEL[key]
     return str(key).replace("_", " ")
 
 
 def fmt_num(v):
     """1,312,000 for whole numbers; real decimals keep their precision."""
+    if isinstance(v, bool):
+        return str(v)
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return str(v)
+    if not math.isfinite(f):  # rejected junk is shown as-is, never formatted
         return str(v)
     if f == int(f):
         return "{:,}".format(int(f))
@@ -79,23 +84,28 @@ def fmt_value(value, unit):
 def source_line(src):
     """One quiet line of provenance: type, id, publication date, citation."""
     parts = []
+    if not isinstance(src, dict):
+        return ""
     st = src.get("type", "")
     if st:
+        st = str(st)
         parts.append(SOURCE_TYPE_LABEL.get(st, st.replace("_", " ")))
     if src.get("source_id"):
-        parts.append(src["source_id"])
+        parts.append(str(src["source_id"]))
     if src.get("pub_date"):
-        parts.append("published " + src["pub_date"])
-    cit = (src.get("citation") or {}).get("locator", "")
+        parts.append("published " + str(src["pub_date"]))
+    cit = src.get("citation")
+    cit = cit.get("locator", "") if isinstance(cit, dict) else ""
     if cit:
-        parts.append(cit)
+        parts.append(str(cit))
     return " &middot; ".join(esc(p) for p in parts)
 
 
 def candidate_source(a):
+    cit = a.get("citation")
     return {"type": a.get("source_type", ""), "source_id": a.get("source_id", ""),
             "pub_date": a.get("pub_date", ""),
-            "citation": {"locator": (a.get("citation") or {}).get("locator", "")}}
+            "citation": {"locator": cit.get("locator", "") if isinstance(cit, dict) else ""}}
 
 
 def render_flags(a):
@@ -128,6 +138,8 @@ def resolution_row(r):
         detail += " &middot; supersedes %s (%s, as of %s)" % (
             esc(fmt_num(rv.get("supersedes_value"))), esc(rv.get("prior_source_type")),
             esc(rv.get("prior_as_of")))
+    if r.get("forced_over_change"):
+        detail += " &middot; forced: record had changed since the hold"
     note = ('<div class="prov">note: %s</div>' % esc(r["note"])) if r.get("note") else ""
     return ('<div class="logrow"><time>%s</time>'
             '<div class="what">%s <span class="ent">&middot; %s</span> '

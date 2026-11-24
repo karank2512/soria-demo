@@ -66,6 +66,20 @@ def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _fsync_dir(path):
+    """Persist a rename/unlink in the directory itself (POSIX; best effort)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -73,6 +87,7 @@ def _atomic_write(path, text):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    _fsync_dir(os.path.dirname(path))
 
 
 def _load_json(path, what):
@@ -81,51 +96,15 @@ def _load_json(path, what):
             return json.load(f)
     except FileNotFoundError:
         raise WorkspaceError("%s not found: %s" % (what, path))
+    except OSError as e:  # a directory, permissions, ...
+        raise WorkspaceError("cannot read %s (%s): %s" % (what, e.strerror, path))
     except (ValueError, RecursionError) as e:
         raise WorkspaceError("%s is not valid JSON (%s): %s" % (what, e, path))
 
 
-def validate_record(record):
-    """Return a list of problems with a record file (empty when usable)."""
-    problems = []
-    if not isinstance(record, dict) or not isinstance(record.get("entities"), dict):
-        return ["record must be an object with an 'entities' object"]
-    for ent, edata in record["entities"].items():
-        metrics = edata.get("metrics") if isinstance(edata, dict) else None
-        if not isinstance(metrics, dict):
-            problems.append("%s: 'metrics' must be an object" % ent)
-            continue
-        for metric, m in metrics.items():
-            where = "%s / %s" % (ent, metric)
-            if not isinstance(m, dict):
-                problems.append("%s: entry must be an object" % where)
-                continue
-            if not reconcile.is_finite_number(m.get("value")):
-                problems.append("%s: value must be a finite number" % where)
-            for k in ("unit", "as_of"):
-                if not isinstance(m.get(k), str):
-                    problems.append("%s: %s must be a string" % (where, k))
-            try:
-                reconcile._date(m.get("as_of", ""))
-            except (TypeError, ValueError):
-                problems.append("%s: as_of must be an ISO date" % where)
-            st = (m.get("source") or {}).get("type") if isinstance(m.get("source"), dict) else None
-            if st not in reconcile.AUTHORITY_RANK:
-                problems.append("%s: source.type must be one of %s"
-                                % (where, ", ".join(reconcile.AUTHORITY_RANK)))
-    return problems
-
-
-def validate_registry(registry):
-    if not isinstance(registry, dict) or not registry:
-        return ["registry must be a non-empty object"]
-    problems = []
-    for name, info in registry.items():
-        if not isinstance(info, dict):
-            problems.append("%s: entry must be an object" % name)
-        elif not all(isinstance(a, str) for a in info.get("aliases", [])):
-            problems.append("%s: aliases must be strings" % name)
-    return problems
+# Shared with reconcile.py's CLI so both entry points refuse the same files.
+validate_record = reconcile.record_problems
+validate_registry = reconcile.registry_problems
 
 
 class Workspace:
@@ -204,6 +183,7 @@ class Workspace:
             _atomic_write(self.p(RECORD), reconcile.dumps_safe(txn["record"], indent=2) + "\n")
         _atomic_write(self.p(META), json.dumps(txn["meta"], indent=2) + "\n")
         os.remove(self.p(TXN))
+        _fsync_dir(self.path)
 
     def commit(self, audit_entries, record, meta):
         """Journal the change, then apply it. record=None leaves it unchanged."""
@@ -258,6 +238,8 @@ def cmd_init(args):
     path = os.path.abspath(args.workspace)
     if os.path.exists(os.path.join(path, META)):
         raise WorkspaceError("workspace already exists: %s" % path)
+    if os.path.exists(path) and not os.path.isdir(path):
+        raise WorkspaceError("path exists and is not a directory: %s" % path)
     if os.path.isdir(path) and os.listdir(path):
         raise WorkspaceError("directory is not empty: %s" % path)
     record = _load_json(args.record, "seed record")
@@ -321,7 +303,8 @@ def cmd_ingest(args):
     if args.manifest:
         texts, batches = _load_manifest(args.manifest)
         for c in candidates:
-            if isinstance(c, dict) and "batch" not in c and c.get("source_id") in batches:
+            if (isinstance(c, dict) and "batch" not in c
+                    and isinstance(c.get("source_id"), str) and c["source_id"] in batches):
                 c["batch"] = batches[c["source_id"]]
     if args.batch:
         for c in candidates:
@@ -363,8 +346,8 @@ def cmd_ingest(args):
                 line["record_at_hold"] = d.get("record_before")
             n += 1
             if texts is not None:
-                line["source_checked"] = isinstance(d["candidate"], dict) and \
-                    d["candidate"].get("source_id") in texts
+                sid = d["candidate"].get("source_id") if isinstance(d["candidate"], dict) else None
+                line["source_checked"] = isinstance(sid, str) and sid in texts
             entries.append(line)
         meta["next_decision"] = n
         meta["ingests"].append({
@@ -498,6 +481,11 @@ def cmd_render(args):
     import review_page
     with Workspace(args.workspace) as ws:
         out = os.path.abspath(args.out or ws.p("review.html"))
+        protected = {os.path.realpath(ws.p(n)) for n in
+                     (META, RECORD, REGISTRY, AUDIT, TXN, LOCK)}
+        if os.path.realpath(out) in protected or os.path.isdir(out):
+            raise WorkspaceError("refusing to write the page over %s (workspace data "
+                                 "or a directory); choose another --out" % out)
         if not os.path.isdir(os.path.dirname(out)):
             raise WorkspaceError("output directory does not exist: %s"
                                  % os.path.dirname(out))
