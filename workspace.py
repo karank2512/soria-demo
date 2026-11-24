@@ -118,6 +118,22 @@ validate_record = reconcile.record_problems
 validate_registry = reconcile.registry_problems
 
 
+# Called with the workspace path whenever opening it completes an interrupted
+# change, whatever the command then does (it may still refuse). The app uses
+# this so the "change was completed" notice cannot be lost.
+RECOVERY_LISTENERS = []
+
+
+def _journal_shape_ok(txn):
+    if not isinstance(txn, dict) or not isinstance(txn.get("meta"), dict):
+        return False
+    audit = txn.get("audit")
+    if not isinstance(audit, list) or not all(
+            isinstance(e, dict) and isinstance(e.get("id"), str) for e in audit):
+        return False
+    return txn.get("record") is None or isinstance(txn.get("record"), dict)
+
+
 class Workspace:
     def __init__(self, path):
         self.path = os.path.abspath(path)
@@ -144,6 +160,9 @@ class Workspace:
         self._locked = True
         try:
             self.recovered = self.recover()
+            if self.recovered:
+                for listener in list(RECOVERY_LISTENERS):
+                    listener(self.path)
         except BaseException:
             self.__exit__(None, None, None)
             raise
@@ -165,6 +184,10 @@ class Workspace:
             raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
                                  "changed. Inspect it before using this workspace."
                                  % (self.p(TXN), e), "corrupt_journal")
+        if not _journal_shape_ok(txn):
+            raise WorkspaceError("the change journal %s is damaged (unexpected contents); "
+                                 "nothing was changed. Inspect it before using this "
+                                 "workspace." % self.p(TXN), "corrupt_journal")
         self._roll_forward(txn)
         return True
 

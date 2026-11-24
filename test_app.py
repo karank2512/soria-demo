@@ -368,6 +368,49 @@ class TestRequestChecks(AppBase):
         self.assertEqual(status, 200)
         s.close()
 
+    def test_trickled_upload_abandoned_after_total_deadline(self):
+        import socket
+        import time as _time
+        old = app.REQUEST_TIMEOUT
+        self.server.stop()
+        try:
+            app.REQUEST_TIMEOUT = 1
+            self.server = Server(self.ws)
+        finally:
+            app.REQUEST_TIMEOUT = old
+        s = socket.create_connection(("127.0.0.1", self.server.port))
+        s.sendall(("POST /api/import HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nOrigin: "
+                   "http://127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                   "Content-Length: 100\r\n\r\n" % (self.server.port, self.server.port)
+                   ).encode())
+        start = _time.monotonic()
+        reply = b""
+        s.settimeout(0.3)
+        while _time.monotonic() - start < 4 and b"\r\n\r\n" not in reply:
+            try:
+                s.sendall(b"x")            # one byte every 0.3 s: each read succeeds
+            except OSError:
+                break
+            try:
+                reply += s.recv(4096)
+            except OSError:
+                pass
+        elapsed = _time.monotonic() - start
+        s.close()
+        self.assertIn(b" 408 ", reply.split(b"\r\n")[0])
+        self.assertLess(elapsed, 3)
+
+    def test_surrogates_in_manifest_batch_and_source_names_refused(self):
+        p1 = demo_import_payload()
+        man = json.loads(p1["manifest"])
+        man[0]["batch"] = "\ud800"
+        p1["manifest"] = json.dumps(man)
+        p2 = demo_import_payload()
+        p2["sources"]["\ud800.txt"] = "x"
+        for payload in (p1, p2):
+            status, _, _ = self.server.import_json(payload)
+            self.assertEqual(status, 400)
+
     def test_binds_loopback_only(self):
         self.assertEqual(self.server.srv.server_address[0], "127.0.0.1")
 
@@ -418,6 +461,42 @@ class TestRecoveryAndReadOnly(AppBase):
         self.assertEqual(status, 200)
         _, _, page = self.server.get("/")
         self.assertIn("was interrupted; it was completed", page)
+
+    def test_recovery_notice_survives_head_first(self):
+        self.do_import()
+        self.plant_journal()
+        status, _, _ = self.server.request("HEAD", "/")   # HEAD triggers the recovery
+        self.assertEqual(status, 200)
+        _, _, page = self.server.get("/")
+        self.assertIn("was interrupted; it was completed", page)
+
+    def test_recovery_notice_survives_refused_post_first(self):
+        self.do_import()
+        self.plant_journal()                               # the journal resolves D-2
+        status, _, page = self.server.resolve("D-2", "dismiss")  # refused: already resolved
+        self.assertEqual(status, 409)
+        # The refusal page is a full hold page, so the notice is shown right there.
+        self.assertIn("was interrupted; it was completed", page)
+        self.assertIn("Already resolved", page)
+
+    def test_recovery_notice_survives_refused_import_first(self):
+        self.do_import()
+        self.plant_journal()
+        status, _, _ = self.server.import_json(demo_import_payload())  # 409 duplicate (JSON)
+        self.assertEqual(status, 409)
+        _, _, page = self.server.get("/")   # a JSON reply has no page, so it waits
+        self.assertIn("was interrupted; it was completed", page)
+
+    def test_wrong_shape_journal_is_read_only(self):
+        self.do_import()
+        for content in ("[]", "{}", "null", '{"audit": 1, "meta": {}}'):
+            with open(os.path.join(self.ws, "txn.json"), "w") as f:
+                f.write(content)
+            before = self.files()
+            status, _, page = self.server.get("/")
+            self.assertEqual(status, 503, content)
+            self.assertIn("change journal", page)
+            self.assertEqual(self.files(), before)
 
     def test_torn_journal_is_read_only_not_an_upload_error(self):
         self.do_import()

@@ -30,6 +30,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -222,6 +223,12 @@ class App:
         self.port = port
         self.token = secrets.token_urlsafe(32)
         self.recovered_notice = False
+        self.rendering_head = False  # a HEAD response has no body to show notices in
+        workspace.RECOVERY_LISTENERS.append(self._on_recover)
+
+    def _on_recover(self, path):
+        if os.path.abspath(path) == self.ws_path:
+            self.recovered_notice = True
 
     def hosts(self):
         return {"127.0.0.1:%d" % self.port, "localhost:%d" % self.port}
@@ -232,8 +239,6 @@ class App:
             meta = ws.meta()
             audit = ws.audit()
             record = ws.record()
-            if ws.recovered:
-                self.recovered_notice = True
             holds = ws.open_holds(audit)
             texts = {}
             for e in audit:
@@ -281,7 +286,8 @@ def notices(app, extra=""):
         out.append('<div class="notice warn">The last change to this workspace was '
                    'interrupted; it was completed when the workspace was opened. '
                    'Nothing was lost.</div>')
-        app.recovered_notice = False
+        if not app.rendering_head:
+            app.recovered_notice = False
     return "".join(out) + extra
 
 
@@ -613,9 +619,11 @@ def make_handler(app):
                 return self.fail(Refusal("Unexpected error; nothing was changed.", "error"))
 
         def do_HEAD(self):
-            keep = app.recovered_notice  # a HEAD has no body to show the notice in
-            self.do_GET()
-            app.recovered_notice = app.recovered_notice or keep
+            app.rendering_head = True  # the notice waits for a page that shows it
+            try:
+                self.do_GET()
+            finally:
+                app.rendering_head = False
 
         # -- POST --
         def read_body(self, as_json):
@@ -632,15 +640,7 @@ def make_handler(app):
                 self.close_connection = True
                 raise Refusal("The upload is larger than %d MB." % (MAX_BODY // 2 ** 20),
                               "too_large")
-            try:
-                raw = self.rfile.read(n)
-            except (TimeoutError, OSError):
-                self.close_connection = True
-                raise Refusal("The upload stalled and was abandoned; nothing was changed.",
-                              "timeout")
-            if len(raw) != n:
-                self.close_connection = True
-                raise Refusal("The upload was cut short; nothing was changed.", "bad_request")
+            raw = self.read_exactly(n)
             if as_json:
                 token = self.headers.get("X-Form-Token", "")
                 try:
@@ -662,6 +662,34 @@ def make_handler(app):
                 raise Refusal("The form token is missing or out of date. Reload the page "
                               "and try again.", "forbidden")
             return data
+
+        def read_exactly(self, n):
+            """Read the body within REQUEST_TIMEOUT in total, however it trickles in."""
+            deadline = time.monotonic() + self.timeout
+            parts, got = [], 0
+            try:
+                while got < n:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(left)
+                    chunk = self.rfile.read1(min(65536, n - got))
+                    if not chunk:
+                        self.close_connection = True
+                        raise Refusal("The upload was cut short; nothing was changed.",
+                                      "bad_request")
+                    parts.append(chunk)
+                    got += len(chunk)
+            except (TimeoutError, OSError):
+                self.close_connection = True
+                raise Refusal("The upload took longer than %d seconds and was abandoned; "
+                              "nothing was changed." % self.timeout, "timeout")
+            finally:
+                try:
+                    self.connection.settimeout(self.timeout)
+                except OSError:
+                    pass
+            return b"".join(parts)
 
         def do_POST(self):
             url = urllib.parse.urlsplit(self.path)
@@ -739,12 +767,13 @@ def do_import(app, data):
     if batch is not None:
         _utf8(batch, "batch id")
     workspace.parse_candidates(raw)  # clean JSON error first
-    for v in (texts or {}).values():
+    for k, v in sources.items():
+        _utf8(k, "source file name")
         _utf8(v, "source file")
-    res = workspace.ingest(app.ws_path, raw, name, texts=texts,
+    for v in (batches or {}).values():
+        _utf8(v, "manifest batch id")
+    workspace.ingest(app.ws_path, raw, name, texts=texts,
                            batches=batches, batch_default=batch)
-    if res.get("recovered"):
-        app.recovered_notice = True
     state = app.read()
     return {"ok": True, "redirect": "/?imported=%d" % (len(state["meta"]["ingests"]) - 1)}
 
@@ -764,8 +793,6 @@ def do_resolve(app, hold_id, data):
         raise Refusal("Choose Accept or Dismiss.", "bad_action")
     res = workspace.resolve(app.ws_path, hold_id, action, data.get("reviewer", ""),
                             data.get("note", "").strip(), force)
-    if res.get("recovered"):
-        app.recovered_notice = True
     return res
 
 
