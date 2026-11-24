@@ -12,6 +12,7 @@ All data is synthetic and labeled as such.
 
 import argparse
 import html
+import math
 import json
 
 DECISION_LABEL = {"apply": "Applied", "hold": "Held for review", "reject": "Rejected"}
@@ -47,16 +48,20 @@ def esc(s):
 
 
 def metric_label(key):
-    if key in METRIC_LABEL:
+    if isinstance(key, str) and key in METRIC_LABEL:
         return METRIC_LABEL[key]
     return str(key).replace("_", " ")
 
 
 def fmt_num(v):
     """1,312,000 for whole numbers; real decimals keep their precision."""
+    if isinstance(v, bool):
+        return str(v)
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        return str(v)
+    if not math.isfinite(f):  # rejected junk is shown as-is, never formatted
         return str(v)
     if f == int(f):
         return "{:,}".format(int(f))
@@ -79,23 +84,28 @@ def fmt_value(value, unit):
 def source_line(src):
     """One quiet line of provenance: type, id, publication date, citation."""
     parts = []
+    if not isinstance(src, dict):
+        return ""
     st = src.get("type", "")
     if st:
+        st = str(st)
         parts.append(SOURCE_TYPE_LABEL.get(st, st.replace("_", " ")))
     if src.get("source_id"):
-        parts.append(src["source_id"])
+        parts.append(str(src["source_id"]))
     if src.get("pub_date"):
-        parts.append("published " + src["pub_date"])
-    cit = (src.get("citation") or {}).get("locator", "")
+        parts.append("published " + str(src["pub_date"]))
+    cit = src.get("citation")
+    cit = cit.get("locator", "") if isinstance(cit, dict) else ""
     if cit:
-        parts.append(cit)
+        parts.append(str(cit))
     return " &middot; ".join(esc(p) for p in parts)
 
 
 def candidate_source(a):
+    cit = a.get("citation")
     return {"type": a.get("source_type", ""), "source_id": a.get("source_id", ""),
             "pub_date": a.get("pub_date", ""),
-            "citation": {"locator": (a.get("citation") or {}).get("locator", "")}}
+            "citation": {"locator": cit.get("locator", "") if isinstance(cit, dict) else ""}}
 
 
 def render_flags(a):
@@ -105,6 +115,40 @@ def render_flags(a):
         out.append('<span class="flagchip">%s</span> <span class="code">%s</span>'
                    % (esc(FLAG_LABEL.get(fl, fl.replace("_", " "))), esc(fl)))
     return "".join(out)
+
+
+def hold_id(a):
+    """' &middot; D-3' when the entry carries a workspace decision id."""
+    return (" &middot; " + esc(a["id"])) if a.get("id") else ""
+
+
+RESOLUTION_LABEL = {"accept": ("Accepted", "applied"),
+                    "dismiss": ("Dismissed", "rejected")}
+
+
+def resolution_row(r):
+    label, cls = RESOLUTION_LABEL.get(r.get("action"), ("Resolved", "held"))
+    detail = "%s %s by %s" % (esc(r.get("id", "")), "accepted" if r.get("action") == "accept"
+                              else "dismissed", esc(r.get("reviewer", "")))
+    detail += " &middot; resolves hold %s" % esc(r.get("resolves", ""))
+    if r.get("hold_reason"):
+        detail += " (%s)" % esc(r["hold_reason"])
+    if r.get("revision"):
+        rv = r["revision"]
+        detail += " &middot; supersedes %s (%s, as of %s)" % (
+            esc(fmt_num(rv.get("supersedes_value"))), esc(rv.get("prior_source_type")),
+            esc(rv.get("prior_as_of")))
+    if r.get("forced_over_change"):
+        detail += " &middot; forced: record had changed since the hold"
+    note = ('<div class="prov">note: %s</div>' % esc(r["note"])) if r.get("note") else ""
+    return ('<div class="logrow"><time>%s</time>'
+            '<div class="what">%s <span class="ent">&middot; %s</span> '
+            '<span class="val">%s</span><div class="prov">%s</div>%s</div>'
+            '<span class="tag %s">%s</span></div>' % (
+                esc(r.get("ts", "")), esc(metric_label(r.get("metric", ""))),
+                esc(r.get("entity", "")),
+                fmt_value(r.get("claimed_value"), r.get("unit", "")),
+                detail, note, cls, esc(label)))
 
 
 def load_json(path):
@@ -256,9 +300,16 @@ def main(argv=None):
             if line:
                 audit.append(json.loads(line))
 
-    holds = [a for a in audit if a["decision"] == "hold"]
-    rejects = [a for a in audit if a["decision"] == "reject"]
-    applies = [a for a in audit if a["decision"] == "apply"]
+    # Analyst resolutions (written by workspace.py) close holds; engine
+    # decisions are everything else. Logs from reconcile.py alone have none.
+    resolutions = [a for a in audit if a.get("type") == "resolution"]
+    decisions = [a for a in audit if a.get("type") != "resolution"
+                 and a.get("decision") in DECISION_LABEL]
+    resolved = {r.get("resolves") for r in resolutions}
+    all_holds = [a for a in decisions if a["decision"] == "hold"]
+    holds = [a for a in all_holds if a.get("id") is None or a["id"] not in resolved]
+    rejects = [a for a in decisions if a["decision"] == "reject"]
+    applies = [a for a in decisions if a["decision"] == "apply"]
 
     # Source conflicts: held candidates grouped by (entity, metric), each shown
     # against the value the record currently holds for that pair.
@@ -293,13 +344,21 @@ def main(argv=None):
              '<div class="stat"><b>%d</b><span>processed</span></div>'
              '<div class="stat"><b>%d</b><span>applied</span></div>'
              '<div class="stat"><b>%d</b><span>held</span></div>'
-             '<div class="stat"><b>%d</b><span>rejected</span></div></div>'
-             % (len(audit), len(applies), len(holds), len(rejects)))
+             '<div class="stat"><b>%d</b><span>rejected</span></div>%s</div>'
+             % (len(decisions), len(applies), len(all_holds), len(rejects),
+                ('<div class="stat"><b>%d</b><span>resolved by analyst</span></div>'
+                 '<div class="stat"><b>%d</b><span>awaiting review</span></div>'
+                 % (len(resolutions), len(holds))) if resolutions else ""))
 
     # ---- Review: everything held for a person, first --------------------
     other_holds = [a for a in holds if a["reason_code"] != "conflicting_sources"]
     p.append('<section id="review">')
     p.append('<h2>Held for review (%d)</h2>' % len(holds))
+    if resolutions:
+        p.append('<div class="sec-note">Holds already accepted or dismissed by an analyst are '
+                 'in the decision log, not here. Resolve one with '
+                 '<span class="code">workspace.py resolve WORKSPACE ID --accept|--dismiss</span>.'
+                 '</div>')
     p.append('<div class="sec-note">Every hold waits for an analyst; the current record stands '
              'until a person rules. Sources that disagree about the same metric are compared '
              'side by side below.</div>')
@@ -332,13 +391,13 @@ def main(argv=None):
             for i, a in enumerate(cands, 1):
                 flags = render_flags(a)
                 p.append('<div class="col">'
-                         '<span class="col-role">Candidate %d &middot; held</span>'
+                         '<span class="col-role">Candidate %d &middot; held%s</span>'
                          '<div class="col-value">%s</div>'
                          '<div class="col-period">claimed for %s</div>'
                          '<div class="col-src">%s</div>'
                          '<div class="col-decision"><span class="tag held">Held</span>'
                          '<span class="code">%s</span>%s</div></div>' % (
-                             i, fmt_value(a["claimed_value"], a.get("unit", "")),
+                             i, hold_id(a), fmt_value(a["claimed_value"], a.get("unit", "")),
                              esc(a.get("period", "")),
                              source_line(candidate_source(a)),
                              esc(a["reason_code"]), flags))
@@ -353,12 +412,12 @@ def main(argv=None):
                  '<div class="qrow-top"><div class="qrow-what">%s '
                  '<span class="ent">&middot; %s</span></div>'
                  '<div class="qrow-val">%s</div></div>'
-                 '<div class="qrow-why"><span class="tag held">Held</span>'
+                 '<div class="qrow-why"><span class="tag held">Held%s</span>'
                  '<span class="code">%s</span>%s</div>'
                  '<div class="qrow-src">%s &middot; claimed for %s</div></div>' % (
                      esc(metric_label(a["metric"])), esc(a["entity"]),
                      fmt_value(a["claimed_value"], a.get("unit", "")),
-                     esc(a["reason_code"]), flags,
+                     hold_id(a), esc(a["reason_code"]), flags,
                      source_line(candidate_source(a)), esc(a.get("period", ""))))
     p.append("</section>")
 
@@ -409,10 +468,16 @@ def main(argv=None):
 
     # ---- Decision log ------------------------------------------------------
     p.append('<section id="log">')
-    p.append('<h2>Decision log (%d applied &middot; %d held &middot; %d rejected)</h2>'
-             % (len(applies), len(holds), len(rejects)))
+    p.append('<h2>Decision log (%d applied &middot; %d held &middot; %d rejected%s)</h2>'
+             % (len(applies), len(all_holds), len(rejects),
+                (" &middot; %d resolved" % len(resolutions)) if resolutions else ""))
     p.append('<div class="sec-note">Append-only within a run. Every decision keeps its reason; applied values record what they supersede.</div>')
     for a in audit:
+        if a.get("type") == "resolution":
+            p.append(resolution_row(a))
+            continue
+        if a.get("decision") not in DECISION_LABEL:
+            continue
         cls = {"apply": "applied", "hold": "held", "reject": "rejected"}[a["decision"]]
         prov = ""
         if a.get("revision"):
