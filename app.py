@@ -29,7 +29,9 @@ import http.server
 import json
 import os
 import secrets
+import socket
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -52,7 +54,7 @@ STATUS = {
     "no_reviewer": 400, "bad_action": 400, "bad_json": 400, "not_list": 400,
     "unbatched": 400, "bad_manifest": 400, "missing_source": 400,
     "note_required": 400, "bad_request": 400,
-    "forbidden": 403, "too_large": 413,
+    "forbidden": 403, "too_large": 413, "connection_lost": 400,
     "corrupt_audit": 503, "corrupt_journal": 503, "schema": 503, "timeout": 408, "not_workspace": 503,
     "not_found": 503, "unreadable": 503,
 }
@@ -78,6 +80,7 @@ TITLE = {
     "corrupt_audit": "Workspace needs attention",
     "corrupt_journal": "Workspace needs attention",
     "timeout": "Request timed out",
+    "connection_lost": "Upload interrupted",
     "schema": "Workspace needs attention",
     "not_workspace": "Workspace not found",
 }
@@ -225,6 +228,13 @@ class App:
         self.recovered_notice = False
         self.rendering_head = False  # a HEAD response has no body to show notices in
         workspace.RECOVERY_LISTENERS.append(self._on_recover)
+
+    def close(self):
+        """Stop listening for recoveries (called when the server closes)."""
+        try:
+            workspace.RECOVERY_LISTENERS.remove(self._on_recover)
+        except ValueError:
+            pass
 
     def _on_recover(self, path):
         if os.path.abspath(path) == self.ws_path:
@@ -537,8 +547,50 @@ def page_error(app, err, back="/"):
 def make_handler(app):
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "ReconciliationWorkbench"
-        timeout = REQUEST_TIMEOUT  # socket timeout for every read
+        timeout = REQUEST_TIMEOUT  # socket timeout for every read; also the deadline
         sys_version = ""
+
+        # -- request line and headers: one total deadline ----------------------
+        # The socket timeout applies per read, so a client trickling header
+        # bytes could otherwise hold this single-threaded server. A timer shuts
+        # the connection if the request line and headers are not complete in
+        # time; an idle keep-alive connection is closed the same way.
+        def handle_one_request(self):
+            self._head_lock = threading.Lock()
+            self._head_done = False
+            self._head_expired = False
+            timer = threading.Timer(self.timeout, self._head_deadline)
+            timer.daemon = True
+            timer.start()
+            try:
+                super().handle_one_request()
+            except (ConnectionError, TimeoutError, socket.timeout) as e:
+                # The client went away mid-request or mid-reply: nothing to
+                # answer, and nothing for the log beyond one line.
+                self.close_connection = True
+                self.log_message("connection dropped by client (%s)", type(e).__name__)
+            finally:
+                timer.cancel()
+
+        def _head_deadline(self):
+            with self._head_lock:
+                if self._head_done:
+                    return
+                self._head_expired = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def parse_request(self):
+            ok = super().parse_request()
+            with self._head_lock:
+                self._head_done = True
+                expired = self._head_expired
+            if expired:
+                self.close_connection = True
+                return False
+            return ok
 
         def log_message(self, fmt, *args):
             sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
@@ -680,10 +732,14 @@ def make_handler(app):
                                       "bad_request")
                     parts.append(chunk)
                     got += len(chunk)
-            except (TimeoutError, OSError):
+            except (TimeoutError, socket.timeout):
                 self.close_connection = True
                 raise Refusal("The upload took longer than %d seconds and was abandoned; "
                               "nothing was changed." % self.timeout, "timeout")
+            except OSError:
+                self.close_connection = True
+                raise Refusal("The upload connection closed before it finished; nothing "
+                              "was changed.", "connection_lost")
             finally:
                 try:
                     self.connection.settimeout(self.timeout)
@@ -805,10 +861,20 @@ def _utf8(text, what):
                       "bad_request")
 
 
+class _Server(http.server.HTTPServer):
+    app = None
+
+    def server_close(self):
+        super().server_close()
+        if self.app is not None:
+            self.app.close()
+
+
 def make_server(ws_path, port=0):
     """Bind to loopback; returns (server, app). port=0 picks a free port."""
-    srv = http.server.HTTPServer(("127.0.0.1", port), None)
+    srv = _Server(("127.0.0.1", port), None)
     app = App(ws_path, srv.server_address[1])
+    srv.app = app
     srv.RequestHandlerClass = make_handler(app)
     return srv, app
 

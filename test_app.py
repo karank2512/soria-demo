@@ -7,13 +7,18 @@ Test workspaces are kept, never deleted; run with TMPDIR pointing at a
 scratch folder to keep them out of the system temp directory.
 """
 
+import contextlib
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
+import socket
+import struct
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 
@@ -27,6 +32,12 @@ DOCS = os.path.join(HERE, "demo_docs")
 def read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def workspace_journal(audit, record, meta):
+    """A journal as the workspace writes it (with its checksum)."""
+    return {"audit": audit, "record": record, "meta": meta,
+            "sha256": workspace.journal_digest(audit, record, meta)}
 
 
 def demo_import_payload():
@@ -415,6 +426,79 @@ class TestRequestChecks(AppBase):
         self.assertEqual(self.server.srv.server_address[0], "127.0.0.1")
 
 
+class TestConnectionHandling(AppBase):
+    def restart_with_timeout(self, seconds):
+        old = app.REQUEST_TIMEOUT
+        self.server.stop()
+        try:
+            app.REQUEST_TIMEOUT = seconds
+            self.server = Server(self.ws)
+        finally:
+            app.REQUEST_TIMEOUT = old
+
+    def timed_get(self):
+        start = time.monotonic()
+        status, _, _ = self.server.get("/app.css")
+        return status, time.monotonic() - start
+
+    def test_trickled_headers_cannot_stall_the_app(self):
+        self.restart_with_timeout(1)
+        s = socket.create_connection(("127.0.0.1", self.server.port))
+        stop = threading.Event()
+
+        def trickle():
+            for b in b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: " + b"a" * 200:
+                if stop.is_set():
+                    return
+                try:
+                    s.sendall(bytes([b]))
+                except OSError:
+                    return
+                time.sleep(0.2)
+        t = threading.Thread(target=trickle, daemon=True)
+        t.start()
+        time.sleep(0.3)
+        status, waited = self.timed_get()   # queued behind the trickler
+        stop.set()
+        s.close()
+        self.assertEqual(status, 200)
+        self.assertLess(waited, 2.5)
+
+    def test_idle_connection_cannot_stall_the_app(self):
+        self.restart_with_timeout(1)
+        s = socket.create_connection(("127.0.0.1", self.server.port))  # sends nothing
+        time.sleep(0.2)
+        status, waited = self.timed_get()
+        s.close()
+        self.assertEqual(status, 200)
+        self.assertLess(waited, 2.5)
+
+    def test_reset_mid_upload_is_labelled_and_logged_without_traceback(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            s = socket.create_connection(("127.0.0.1", self.server.port))
+            s.sendall(("POST /api/import HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nOrigin: "
+                       "http://127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                       "Content-Length: 1000\r\n\r\n{\"x\": " % (self.server.port,
+                                                               self.server.port)).encode())
+            time.sleep(0.2)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            s.close()                       # RST: the client vanished mid-body
+            time.sleep(0.5)
+            status, _, _ = self.server.get("/")
+        self.assertEqual(status, 200)
+        log = err.getvalue()
+        self.assertNotIn("Traceback", log)
+        self.assertNotIn("took longer than", log)
+
+    def test_recovery_listeners_do_not_accumulate(self):
+        n = len(workspace.RECOVERY_LISTENERS)
+        for _ in range(3):
+            extra = Server(self.ws)
+            extra.stop()
+        self.assertEqual(len(workspace.RECOVERY_LISTENERS), n)
+
+
 class TestRecoveryAndReadOnly(AppBase):
     def test_interrupted_change_completed_and_announced_once(self):
         self.do_import()
@@ -429,7 +513,7 @@ class TestRecoveryAndReadOnly(AppBase):
                  "ts": "2026-11-25T12:00:00"}
         meta["next_resolution"] = 2
         with open(os.path.join(self.ws, "txn.json"), "w") as f:
-            json.dump({"audit": [entry], "record": record, "meta": meta}, f)
+            json.dump(workspace_journal([entry], record, meta), f)
         self.server = Server(self.ws)
         _, _, first = self.server.get("/")
         _, _, second = self.server.get("/")
@@ -450,7 +534,7 @@ class TestRecoveryAndReadOnly(AppBase):
                  "ts": "2026-11-25T12:00:00"}
         meta["next_resolution"] = 2
         with open(os.path.join(self.ws, "txn.json"), "w") as f:
-            json.dump({"audit": [entry], "record": record, "meta": meta}, f)
+            json.dump(workspace_journal([entry], record, meta), f)
 
     def test_recovery_notice_survives_post_and_head(self):
         self.do_import()
