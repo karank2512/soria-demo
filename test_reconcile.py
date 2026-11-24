@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Stdlib unittest suite for reconcile.py. Run: python3 -m unittest -v"""
 
+import json
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from reconcile import decide, resolve_entity, citation_ok  # noqa: E402
+from reconcile import (decide, resolve_entity, citation_ok, value_in_source,  # noqa: E402
+                       reconcile_batches, dumps_safe)
 
 REGISTRY = {
     "Halcyon Health": {"aliases": ["Halcyon", "Halcyon Health, Inc."]},
@@ -157,6 +159,150 @@ class TestApply(unittest.TestCase):
         r = decide(REGISTRY, None, c, [c])
         self.assertEqual((r["decision"], r["reason_code"]), ("apply", "new_coverage"))
         self.assertIn("low_authority", r["flags"])
+
+
+class TestStrictTypes(unittest.TestCase):
+    """Malformed fields must be rejected, never applied to the record."""
+
+    def assertInvalid(self, c, record=None):
+        r = decide(REGISTRY, record if record is not None else rec(), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("reject", "invalid_candidate"), r)
+
+    def test_non_finite_values_rejected(self):
+        for v in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+            self.assertInvalid(cand(value=v))
+            self.assertInvalid(cand(value=v, metric="untracked_metric"), record=None)
+
+    def test_bool_and_string_values_rejected(self):
+        for v in (True, False, "1300000", None, [1300000]):
+            self.assertInvalid(cand(value=v))
+
+    def test_citation_present_must_be_bool(self):
+        self.assertInvalid(cand(citation={"present": "false", "locator": "row 2"}))
+        self.assertInvalid(cand(citation={"present": 1, "locator": "row 2"}))
+        self.assertInvalid(cand(citation={"present": True, "locator": 7}))
+
+    def test_text_fields_must_be_strings(self):
+        self.assertInvalid(cand(metric=["ma_enrollment"]))
+        self.assertInvalid(cand(entity={"name": "Halcyon"}))
+        self.assertInvalid(cand(period=""))
+        self.assertInvalid(cand(unit=None))
+        self.assertInvalid(cand(source_id=12))
+
+    def test_huge_integer_and_odd_dates_and_padded_metric_rejected(self):
+        self.assertInvalid(cand(value=10 ** 400))
+        for d in ("20261001", "2026-W40-4", "2026-10-1"):
+            self.assertInvalid(cand(pub_date=d))
+        self.assertInvalid(cand(metric="ma_enrollment "))
+
+    def test_change_flag_must_be_bool(self):
+        self.assertInvalid(cand(unit_or_definition_change="false"))
+
+    def test_corrupt_record_value_held_not_overwritten(self):
+        c = cand()
+        r = decide(REGISTRY, rec(value=float("nan")), c, [c])
+        self.assertEqual((r["decision"], r["reason_code"]), ("hold", "invalid_record_value"))
+
+
+class TestBatchPeers(unittest.TestCase):
+    def test_invalid_peer_does_not_crash_or_block(self):
+        good, bad = cand(), cand(value="abc", source_type="news")
+        r = decide(REGISTRY, rec(), good, [good, bad])
+        self.assertEqual(r["decision"], "apply")
+
+    def test_uncited_peer_cannot_supersede_valid_candidate(self):
+        good = cand(source_type="regulatory_filing", pub_date="2026-10-02")
+        uncited = cand(value=1300500, citation={"present": False, "locator": ""})
+        r = decide(REGISTRY, rec(), good, [good, uncited])
+        self.assertEqual((r["decision"], r["reason_code"]),
+                         ("apply", "authoritative_newer_consistent"))
+
+    def test_uncited_conflicting_peer_does_not_hold(self):
+        good = cand()
+        uncited = cand(value=1400000, citation={"present": True, "locator": "an article"})
+        r = decide(REGISTRY, rec(), good, [good, uncited])
+        self.assertEqual(r["decision"], "apply")
+
+
+class TestSourceBinding(unittest.TestCase):
+    def test_value_found_with_thousands_separators(self):
+        self.assertTrue(value_in_source(1312000, "enrollment reached 1,312,000 members"))
+        self.assertTrue(value_in_source(85.0, "MLR of 85.0 percent"))
+        self.assertTrue(value_in_source(85.0, "row: Halcyon,mlr_pct,85,percent"))
+        self.assertTrue(value_in_source(1312000, "Halcyon,1312000,2026,members"))  # CSV cells
+        self.assertFalse(value_in_source(1312000, "1,312,0000"))  # not valid grouping
+
+    def test_value_absent_or_partial_match(self):
+        self.assertFalse(value_in_source(1312000, "enrollment reached 1,313,000"))
+        self.assertFalse(value_in_source(12, "published 2026-10-12"))  # not a date part
+        self.assertFalse(value_in_source(3, "2026-Q3"))
+
+    def test_value_not_in_source_held(self):
+        c = cand(value=1300000)
+        r = decide(REGISTRY, rec(), c, [c], source_text="members: 1,290,000")
+        self.assertEqual((r["decision"], r["reason_code"]), ("hold", "value_not_in_source"))
+        r = decide(REGISTRY, rec(), c, [c], source_text="members: 1,300,000")
+        self.assertEqual(r["decision"], "apply")
+
+
+class TestReconcileBatches(unittest.TestCase):
+    RECORD = {"entities": {"Halcyon Health": {"metrics": {"ma_enrollment": {
+        "value": 1250000, "unit": "members", "period": "2026-Q2", "as_of": "2026-06-30",
+        "source": {"type": "regulatory_filing", "source_id": "SEED", "pub_date": "2026-08-15",
+                   "citation": {"present": True, "locator": "seed"}}}}}}}
+
+    def test_later_batch_sees_earlier_apply(self):
+        newer = cand(batch="b1", value=1300000, pub_date="2026-10-01", source_id="NEW")
+        older = cand(batch="b2", value=1280000, pub_date="2026-09-15", source_id="OLD")
+        decisions, record = reconcile_batches(REGISTRY, self.RECORD, [newer, older])
+        self.assertEqual([d["result"]["decision"] for d in decisions], ["apply", "hold"])
+        self.assertEqual(decisions[1]["result"]["reason_code"], "stale_source")
+        m = record["entities"]["Halcyon Health"]["metrics"]["ma_enrollment"]
+        self.assertEqual((m["value"], m["source"]["source_id"]), (1300000, "NEW"))
+        self.assertEqual(decisions[0]["prior"]["value"], 1250000)
+
+    def test_input_record_not_mutated_and_non_object_rejected(self):
+        before = json.dumps(self.RECORD, sort_keys=True)
+        decisions, _ = reconcile_batches(REGISTRY, self.RECORD, [5, cand()])
+        self.assertEqual(json.dumps(self.RECORD, sort_keys=True), before)
+        self.assertEqual(decisions[0]["result"]["reason_code"], "invalid_candidate")
+
+    def test_integer_batch_ids_stay_distinct_and_bad_ids_rejected(self):
+        a = cand(batch=1, value=1312000)
+        b = cand(batch=2, value=1400000, pub_date="2026-10-05")
+        decisions, _ = reconcile_batches(REGISTRY, self.RECORD, [a, b, cand(batch=["x"])])
+        by_batch = {d["batch"]: d["result"]["reason_code"] for d in decisions}
+        self.assertEqual(by_batch["1"], "authoritative_newer_consistent")
+        self.assertNotEqual(by_batch["2"], "conflicting_sources")
+        self.assertEqual(by_batch["invalid"], "invalid_candidate")
+
+    def test_tied_duplicates_apply_exactly_once(self):
+        a = cand(value=1300000, source_id="A")
+        b = cand(value=1300100, source_id="B")
+        decisions, record = reconcile_batches(REGISTRY, self.RECORD, [a, b])
+        self.assertEqual([d["result"]["decision"] for d in decisions], ["apply", "reject"])
+        self.assertEqual(record["entities"]["Halcyon Health"]["metrics"]["ma_enrollment"]
+                         ["source"]["source_id"], "A")
+
+    def test_unverified_peer_cannot_supersede_verified_value(self):
+        real = cand(value=1312000, source_type="news", source_id="REAL")
+        fake = cand(value=1313000, source_type="regulatory_filing", source_id="FAKE")
+        texts = {"REAL": "members: 1,312,000", "FAKE": "no numbers here"}
+        decisions, _ = reconcile_batches(REGISTRY, {"entities": {}}, [real, fake],
+                                         source_texts=texts)
+        got = [(d["result"]["decision"], d["result"]["reason_code"]) for d in decisions]
+        self.assertEqual(got, [("apply", "new_coverage"), ("hold", "value_not_in_source")])
+
+    def test_source_missing_from_supplied_documents_is_held(self):
+        c = cand(source_id="NOT-IN-MANIFEST")
+        decisions, _ = reconcile_batches(REGISTRY, self.RECORD, [c], source_texts={})
+        self.assertEqual(decisions[0]["result"]["reason_code"], "source_not_found")
+
+    def test_dumps_safe_never_writes_nan(self):
+        out = dumps_safe({"v": float("nan"), "w": [float("inf")]})
+        self.assertNotIn("NaN", out)
+        json.loads(out)  # strict JSON readers accept it
 
 
 if __name__ == "__main__":

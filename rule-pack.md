@@ -22,8 +22,18 @@ authority rank of the source that set it. A metric may be untracked (no current 
 
 ## Decision procedure (apply in order; first match wins)
 
+0. invalid_candidate - a required field is missing or has the wrong type (value must be a
+   finite number; citation.present must be true/false; text fields non-empty strings)
+   -> REJECT. Malformed candidates never count as batch peers in rule 5.
 1. missing_citation - citation absent, or locator vague (e.g. "a recent filing", "an article")
    -> REJECT.
+1b. value_not_in_source - only when the source document text is available: the claimed value
+   does not appear as a number in the document -> HOLD. (Checks the value is stated in the
+   document; it does not prove it sits at the cited locator.)
+   source_not_found - source documents were supplied but none matches the update's source_id
+   -> HOLD (the value cannot be verified).
+   invalid_record_value - the record's current value for the metric is not a finite number
+   -> HOLD, so a corrupt record value is never silently compared or replaced.
 2. stale_source - update pub_date is on or before the record's as_of date -> HOLD.
 3. unit_or_definition_change - update notes a unit, definition or methodology change
    -> HOLD.
@@ -31,12 +41,29 @@ authority rank of the source that set it. A metric may be untracked (no current 
 5. conflicting_sources - another update in the same batch targets the same entity+metric and
    the claimed values differ by more than 2% (relative to the lower value) -> HOLD (both
    updates). If they agree within 2%, this is not a conflict: APPLY the update with the better
-   authority rank (tie: later pub_date) and REJECT the other as superseded_duplicate.
+   authority rank (tie: later pub_date, then earlier in the batch) and REJECT the other as
+   superseded_duplicate. When source documents are supplied, only updates whose value appears
+   in their own document count as peers here.
 6. low_authority_override - metric is tracked, update's authority rank is worse than the
    current source's rank, and value differs by more than 2% -> HOLD. If it differs by 2% or
    less -> REJECT (redundant_confirmation: value already current from a better source).
 7. Otherwise -> APPLY. Reason new_coverage when the metric was untracked, else
    authoritative_newer_consistent.
+
+## Batches
+
+Batches are processed in input order. Within a batch every update is decided against the record
+as it stood at the start of that batch; a batch's applies are written before the next batch is
+decided.
+
+## Analyst resolution
+
+A HOLD stays open until an analyst resolves it (`workspace.py resolve`): ACCEPT writes the held
+value into the record (with its citation, recording what it supersedes); DISMISS closes the hold
+and leaves the record unchanged. Both are logged with the reviewer's name and note. If the
+record value for that metric changed after the hold was raised (another hold accepted, or a
+later batch applied), ACCEPT is refused unless the analyst passes --force; a forced accept is
+marked in the log.
 
 ## Decisions and flags
 
