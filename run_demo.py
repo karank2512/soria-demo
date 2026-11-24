@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soria demo: run the visible end-to-end artifact.
+"""Reconciliation Workbench: run the visible end-to-end artifact.
 
 Extracts candidates from the curated demo documents (claude CLI, or the
 prebaked mock candidates), reconciles them against the seed record, and

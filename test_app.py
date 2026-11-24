@@ -298,6 +298,76 @@ class TestRequestChecks(AppBase):
         # the Origin check refuses; found by tools/browser_check.py.
         self.assertEqual(headers["Referrer-Policy"], "same-origin")
 
+    def test_null_missing_origin_refused_localhost_host_accepted(self):
+        self.do_import()
+        form = urllib.parse.urlencode({"token": self.server.app.token, "action": "dismiss",
+                                       "reviewer": "a"}).encode()
+        ctype = {"Content-Type": "application/x-www-form-urlencoded"}
+        status, _, _ = self.server.request("POST", "/hold/D-2", form,
+                                           dict(ctype, Origin="null"))
+        self.assertEqual(status, 403)
+        status, _, _ = self.server.request("POST", "/hold/D-2", form, ctype, origin=False)
+        self.assertEqual(status, 403)
+        host = "localhost:%d" % self.server.port
+        status, _, _ = self.server.request("POST", "/hold/D-2", form,
+                                           dict(ctype, Origin="http://" + host), host=host,
+                                           origin=False)
+        self.assertEqual(status, 303)
+
+    def test_odd_tokens_and_queries_get_clean_responses(self):
+        self.do_import()
+        before = self.files()
+        status, _, page = self.server.resolve("D-2", "accept", token="é")
+        self.assertEqual(status, 403)
+        status, _, body = self.server.import_json(demo_import_payload(), token="é")
+        self.assertEqual(status, 403)
+        q = "&".join("q%d=1" % i for i in range(12))
+        status, _, page = self.server.get("/?" + q)
+        self.assertEqual(status, 400)
+        for bad in ("%C2%B2", "9" * 5000):       # superscript two; huge number
+            status, _, page = self.server.get("/?imported=" + bad)
+            self.assertEqual(status, 200)
+            self.assertNotIn("Imported ", page)
+        self.assertEqual(self.files(), before)
+
+    def test_lone_surrogates_refused_and_never_break_pages(self):
+        for field in ("candidates", "batch", "candidates_name"):
+            payload = demo_import_payload()
+            payload[field] = "\ud800" if field != "candidates" else "[\"\ud800\"]"
+            body = json.dumps(payload).encode("utf-8")  # JSON escapes the surrogate
+            status, _, resp = self.server.request(
+                "POST", "/api/import", body,
+                {"Content-Type": "application/json", "X-Form-Token": self.server.app.token})
+            self.assertEqual(status, 400, field)
+        # A surrogate inside a candidate's own fields is stored (JSON-escaped)
+        # and every page still renders.
+        cands = json.loads(demo_import_payload()["candidates"])
+        cands[5]["entity"] = "Merritt \ud800"
+        payload = dict(demo_import_payload(), candidates=json.dumps(cands))
+        status, _, _ = self.server.import_json(payload)
+        self.assertEqual(status, 200)
+        for path in ("/", "/report", "/hold/D-2"):
+            status, _, _ = self.server.get(path)
+            self.assertEqual(status, 200, path)
+
+    def test_stalled_upload_times_out_without_blocking_forever(self):
+        import socket
+        old = app.REQUEST_TIMEOUT
+        self.server.stop()
+        try:
+            app.REQUEST_TIMEOUT = 1
+            self.server = Server(self.ws)
+        finally:
+            app.REQUEST_TIMEOUT = old
+        s = socket.create_connection(("127.0.0.1", self.server.port))
+        s.sendall(("POST /api/import HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nOrigin: "
+                   "http://127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                   "Content-Length: 100\r\n\r\n" % (self.server.port, self.server.port)
+                   ).encode())
+        status, _, _ = self.server.get("/app.css")  # served once the stall times out
+        self.assertEqual(status, 200)
+        s.close()
+
     def test_binds_loopback_only(self):
         self.assertEqual(self.server.srv.server_address[0], "127.0.0.1")
 
@@ -325,6 +395,41 @@ class TestRecoveryAndReadOnly(AppBase):
         self.assertIn("Awaiting review (1)", first)
         self.assertEqual(self.record_value("Halcyon Health", "mlr_pct")["value"], 85.0)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "txn.json")))
+
+    def plant_journal(self):
+        ws = workspace.Workspace(self.ws)
+        meta = ws.meta()
+        record = ws.record()
+        record["entities"]["Halcyon Health"]["metrics"]["mlr_pct"]["value"] = 85.0
+        entry = {"id": "R-1", "type": "resolution", "resolves": "D-2", "action": "accept",
+                 "reviewer": "a", "note": "", "entity": "Halcyon Health",
+                 "metric": "mlr_pct", "claimed_value": 85.0, "unit": "percent",
+                 "ts": "2026-11-25T12:00:00"}
+        meta["next_resolution"] = 2
+        with open(os.path.join(self.ws, "txn.json"), "w") as f:
+            json.dump({"audit": [entry], "record": record, "meta": meta}, f)
+
+    def test_recovery_notice_survives_post_and_head(self):
+        self.do_import()
+        self.plant_journal()
+        status, _, _ = self.server.resolve("D-3", "dismiss")   # first request is a POST
+        self.assertEqual(status, 303)
+        status, _, _ = self.server.request("HEAD", "/")
+        self.assertEqual(status, 200)
+        _, _, page = self.server.get("/")
+        self.assertIn("was interrupted; it was completed", page)
+
+    def test_torn_journal_is_read_only_not_an_upload_error(self):
+        self.do_import()
+        with open(os.path.join(self.ws, "txn.json"), "w") as f:
+            f.write("{torn")
+        before = self.files()
+        status, _, page = self.server.get("/")
+        self.assertEqual(status, 503)
+        self.assertIn("change journal", page)
+        self.assertIn("read-only until this is fixed", page)
+        self.assertEqual(self.files(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, ".lock")))
 
     def test_corrupt_audit_is_read_only(self):
         self.do_import()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soria demo: corpus harness. Runs scenarios through extract + reconcile and
+"""Reconciliation Workbench: corpus harness. Runs scenarios through extract + reconcile and
 scores real numbers.
 
 Modes:

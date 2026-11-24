@@ -42,6 +42,7 @@ from workspace import WorkspaceError  # noqa: E402
 
 PRODUCT = "Reconciliation Workbench"
 MAX_BODY = 5 * 1024 * 1024
+REQUEST_TIMEOUT = 10  # seconds; a stalled client cannot hold the app longer
 
 STATUS = {
     "locked": 409, "already_resolved": 409, "record_changed": 409,
@@ -51,7 +52,7 @@ STATUS = {
     "unbatched": 400, "bad_manifest": 400, "missing_source": 400,
     "note_required": 400, "bad_request": 400,
     "forbidden": 403, "too_large": 413,
-    "corrupt_audit": 503, "schema": 503, "not_workspace": 503,
+    "corrupt_audit": 503, "corrupt_journal": 503, "schema": 503, "timeout": 408, "not_workspace": 503,
     "not_found": 503, "unreadable": 503,
 }
 
@@ -74,12 +75,14 @@ TITLE = {
     "forbidden": "Request refused",
     "too_large": "Upload too large",
     "corrupt_audit": "Workspace needs attention",
+    "corrupt_journal": "Workspace needs attention",
+    "timeout": "Request timed out",
     "schema": "Workspace needs attention",
     "not_workspace": "Workspace not found",
 }
 
 # Read-only mode: the workspace can be read but not safely written.
-READ_ONLY_CODES = {"corrupt_audit", "schema", "not_workspace", "not_found", "unreadable"}
+READ_ONLY_CODES = {"corrupt_audit", "corrupt_journal", "schema", "not_workspace", "not_found", "unreadable"}
 
 APP_CSS = """
 .wordmark a{color:inherit;text-decoration:none}
@@ -287,7 +290,8 @@ def page_queue(app, state, query):
     s = workspace.summary(meta, audit, state["record"], holds)
     body = [notices(app)]
     imported = query.get("imported", [""])[0]
-    if imported.isdigit() and int(imported) < len(meta["ingests"]):
+    if (imported.isascii() and imported.isdigit() and len(imported) <= 9
+            and int(imported) < len(meta["ingests"])):
         ing = meta["ingests"][int(imported)]
         c = ing.get("counts") or {}
         body.append('<div class="notice ok">Imported %s: %d update(s) &middot; %d applied, '
@@ -527,6 +531,7 @@ def page_error(app, err, back="/"):
 def make_handler(app):
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "ReconciliationWorkbench"
+        timeout = REQUEST_TIMEOUT  # socket timeout for every read
         sys_version = ""
 
         def log_message(self, fmt, *args):
@@ -535,7 +540,9 @@ def make_handler(app):
         # -- responses --
         def send(self, status, body, ctype="text/html; charset=utf-8", extra=None,
                  csp=None):
-            data = body.encode("utf-8") if isinstance(body, str) else body
+            # "replace": a stored lone surrogate (legal in JSON escapes) must
+            # never make a page impossible to render.
+            data = body.encode("utf-8", "replace") if isinstance(body, str) else body
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
@@ -573,7 +580,10 @@ def make_handler(app):
             if not self.host_ok():
                 return self.fail(Refusal("Unexpected Host header.", "forbidden"))
             url = urllib.parse.urlsplit(self.path)
-            query = urllib.parse.parse_qs(url.query, max_num_fields=10)
+            try:
+                query = urllib.parse.parse_qs(url.query, max_num_fields=10)
+            except ValueError:
+                return self.fail(Refusal("Too many query parameters.", "bad_request"))
             path = url.path
             if path == "/app.css":
                 return self.send(200, review_page.CSS + APP_CSS, "text/css; charset=utf-8")
@@ -602,7 +612,10 @@ def make_handler(app):
                 self.log_message("unexpected error: %r", e)
                 return self.fail(Refusal("Unexpected error; nothing was changed.", "error"))
 
-        do_HEAD = do_GET
+        def do_HEAD(self):
+            keep = app.recovered_notice  # a HEAD has no body to show the notice in
+            self.do_GET()
+            app.recovered_notice = app.recovered_notice or keep
 
         # -- POST --
         def read_body(self, as_json):
@@ -619,7 +632,15 @@ def make_handler(app):
                 self.close_connection = True
                 raise Refusal("The upload is larger than %d MB." % (MAX_BODY // 2 ** 20),
                               "too_large")
-            raw = self.rfile.read(n)
+            try:
+                raw = self.rfile.read(n)
+            except (TimeoutError, OSError):
+                self.close_connection = True
+                raise Refusal("The upload stalled and was abandoned; nothing was changed.",
+                              "timeout")
+            if len(raw) != n:
+                self.close_connection = True
+                raise Refusal("The upload was cut short; nothing was changed.", "bad_request")
             if as_json:
                 token = self.headers.get("X-Form-Token", "")
                 try:
@@ -636,7 +657,8 @@ def make_handler(app):
                     raise Refusal("The form could not be read.", "bad_request")
                 data = {k: v[0] for k, v in data.items()}
                 token = data.get("token", "")
-            if not secrets.compare_digest(str(token), app.token):
+            given = str(token).encode("utf-8", "surrogateescape")
+            if not secrets.compare_digest(given, app.token.encode("ascii")):
                 raise Refusal("The form token is missing or out of date. Reload the page "
                               "and try again.", "forbidden")
             return data
@@ -712,9 +734,17 @@ def do_import(app, data):
                                      "missing_source")
             return sources[base]
         texts, batches = workspace.parse_manifest(parsed, read_file)
-    workspace.parse_candidates(cand.encode("utf-8"))  # clean JSON error first
-    workspace.ingest(app.ws_path, cand.encode("utf-8"), name, texts=texts,
-                     batches=batches, batch_default=batch)
+    raw = _utf8(cand, "candidates file")
+    _utf8(name, "file name")
+    if batch is not None:
+        _utf8(batch, "batch id")
+    workspace.parse_candidates(raw)  # clean JSON error first
+    for v in (texts or {}).values():
+        _utf8(v, "source file")
+    res = workspace.ingest(app.ws_path, raw, name, texts=texts,
+                           batches=batches, batch_default=batch)
+    if res.get("recovered"):
+        app.recovered_notice = True
     state = app.read()
     return {"ok": True, "redirect": "/?imported=%d" % (len(state["meta"]["ingests"]) - 1)}
 
@@ -732,8 +762,20 @@ def do_resolve(app, hold_id, data):
         action, force = "accept", True
     if action not in ("accept", "dismiss"):
         raise Refusal("Choose Accept or Dismiss.", "bad_action")
-    return workspace.resolve(app.ws_path, hold_id, action, data.get("reviewer", ""),
-                             data.get("note", "").strip(), force)
+    res = workspace.resolve(app.ws_path, hold_id, action, data.get("reviewer", ""),
+                            data.get("note", "").strip(), force)
+    if res.get("recovered"):
+        app.recovered_notice = True
+    return res
+
+
+def _utf8(text, what):
+    """Text as UTF-8 bytes; lone surrogates (possible via JSON escapes) refused."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Refusal("The %s contains characters that are not valid text." % what,
+                      "bad_request")
 
 
 def make_server(ws_path, port=0):

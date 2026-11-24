@@ -159,7 +159,12 @@ class Workspace:
         """Roll an interrupted change forward. Idempotent. Returns True if any."""
         if not os.path.exists(self.p(TXN)):
             return False
-        txn = _load_json(self.p(TXN), "journal")
+        try:
+            txn = _load_json(self.p(TXN), "journal")
+        except WorkspaceError as e:
+            raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
+                                 "changed. Inspect it before using this workspace."
+                                 % (self.p(TXN), e), "corrupt_journal")
         self._roll_forward(txn)
         return True
 
@@ -429,8 +434,10 @@ def ingest(path, raw, filename, texts=None, batches=None, batch_default=None):
             "first_id": entries[0]["id"] if entries else None})
         ws.commit(entries, record, meta)
         open_n = len(ws.open_holds())
+        recovered = ws.recovered
 
-    return {"entries": entries, "counts": counts, "batches": incoming, "open_holds": open_n}
+    return {"entries": entries, "counts": counts, "batches": incoming, "open_holds": open_n,
+            "recovered": recovered}
 
 
 def _short(state):
@@ -519,7 +526,8 @@ def resolve(path, hold_id, action, reviewer, note="", force=False):
         meta["next_resolution"] += 1
         ws.commit([entry], record, meta)
         left = len(ws.open_holds())
-    return {"entry": entry, "open_holds": left}
+        recovered = ws.recovered
+    return {"entry": entry, "open_holds": left, "recovered": recovered}
 
 
 def summary(meta, audit, record, holds):

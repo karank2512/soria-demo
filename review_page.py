@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soria demo: render the analyst review surface as a self-contained HTML page.
+"""Reconciliation Workbench: render the analyst review surface as a self-contained HTML page.
 
 Inputs: updated record.json + audit.jsonl (both produced by reconcile.py).
 Output: review.html - everything held for a person first (source conflicts
