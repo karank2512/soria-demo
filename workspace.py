@@ -42,6 +42,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,14 +125,59 @@ validate_registry = reconcile.registry_problems
 RECOVERY_LISTENERS = []
 
 
-def _journal_shape_ok(txn):
-    if not isinstance(txn, dict) or not isinstance(txn.get("meta"), dict):
-        return False
-    audit = txn.get("audit")
-    if not isinstance(audit, list) or not all(
-            isinstance(e, dict) and isinstance(e.get("id"), str) for e in audit):
-        return False
-    return txn.get("record") is None or isinstance(txn.get("record"), dict)
+_ID_RE = re.compile(r"([DR])-([1-9][0-9]*)")
+META_KEYS = ("schema", "created", "next_decision", "next_resolution", "ingests")
+
+
+def journal_digest(audit, record, meta):
+    """sha256 over a journal's canonical content; stored in the journal."""
+    body = reconcile.dumps_safe({"audit": audit, "record": record, "meta": meta},
+                                sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def journal_problem(txn, current_meta):
+    """Why a journal must not be rolled forward, or None if it is sound.
+
+    Beyond its types, a journal must carry a matching sha256 of its content,
+    a complete schema-1 metadata object, a valid record (when it has one),
+    and audit ids that are exactly the ones this change would allocate next.
+    A journal that was already applied up to its metadata (the last step
+    before removal) is accepted as is.
+    """
+    if not isinstance(txn, dict):
+        return "not an object"
+    audit, record, meta = txn.get("audit"), txn.get("record"), txn.get("meta")
+    if not isinstance(audit, list) or not isinstance(meta, dict):
+        return "audit must be a list and meta an object"
+    if not isinstance(txn.get("sha256"), str) or \
+            txn["sha256"] != journal_digest(audit, record, meta):
+        return "checksum missing or does not match its content"
+    if meta.get("schema") != SCHEMA or any(k not in meta for k in META_KEYS):
+        return "metadata is incomplete or has the wrong schema"
+    nd, nr = meta.get("next_decision"), meta.get("next_resolution")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 1 for v in (nd, nr)) \
+            or not isinstance(meta.get("ingests"), list):
+        return "metadata counters are invalid"
+    if record is not None and reconcile.record_problems(record):
+        return "record is not valid"
+    if meta == current_meta:
+        return None  # already applied up to the metadata; only cleanup remains
+    cd, cr = current_meta.get("next_decision"), current_meta.get("next_resolution")
+    want = {"D": list(range(cd, nd)), "R": list(range(cr, nr))}
+    got = {"D": [], "R": []}
+    for e in audit:
+        m = _ID_RE.fullmatch(e.get("id", "")) if isinstance(e, dict) and \
+            isinstance(e.get("id"), str) else None
+        if m is None:
+            return "audit entry with an invalid id"
+        got[m.group(1)].append(int(m.group(2)))
+    if got != want:
+        return "audit ids do not match the next ids of this workspace"
+    if len(meta["ingests"]) not in (len(current_meta.get("ingests", [])),
+                                    len(current_meta.get("ingests", [])) + 1):
+        return "import history does not follow on from this workspace"
+    return None
 
 
 class Workspace:
@@ -184,10 +230,11 @@ class Workspace:
             raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
                                  "changed. Inspect it before using this workspace."
                                  % (self.p(TXN), e), "corrupt_journal")
-        if not _journal_shape_ok(txn):
-            raise WorkspaceError("the change journal %s is damaged (unexpected contents); "
-                                 "nothing was changed. Inspect it before using this "
-                                 "workspace." % self.p(TXN), "corrupt_journal")
+        problem = journal_problem(txn, _load_json(self.p(META), "workspace metadata"))
+        if problem:
+            raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
+                                 "changed. Inspect it before using this workspace."
+                                 % (self.p(TXN), problem), "corrupt_journal")
         self._roll_forward(txn)
         return True
 
@@ -231,7 +278,8 @@ class Workspace:
         """Journal the change, then apply it. record=None leaves it unchanged."""
         if not self._locked:
             raise RuntimeError("commit outside lock")
-        txn = {"audit": audit_entries, "record": record, "meta": meta}
+        txn = {"audit": audit_entries, "record": record, "meta": meta,
+               "sha256": journal_digest(audit_entries, record, meta)}
         _atomic_write(self.p(TXN), reconcile.dumps_safe(txn) + "\n")
         self._roll_forward(txn)
 
