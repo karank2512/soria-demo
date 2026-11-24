@@ -247,7 +247,10 @@ def cmd_init(args):
     problems = validate_record(record) + validate_registry(registry)
     if problems:
         raise WorkspaceError("seed files are not usable:\n  " + "\n  ".join(problems))
-    os.makedirs(path, exist_ok=True)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        raise WorkspaceError("cannot create workspace directory (%s): %s" % (e.strerror, path))
     _atomic_write(os.path.join(path, REGISTRY), json.dumps(registry, indent=2) + "\n")
     _atomic_write(os.path.join(path, RECORD), reconcile.dumps_safe(record, indent=2) + "\n")
     open(os.path.join(path, AUDIT), "a").close()
@@ -483,7 +486,17 @@ def cmd_render(args):
         out = os.path.abspath(args.out or ws.p("review.html"))
         protected = {os.path.realpath(ws.p(n)) for n in
                      (META, RECORD, REGISTRY, AUDIT, TXN, LOCK)}
-        if os.path.realpath(out) in protected or os.path.isdir(out):
+        def is_protected(path):
+            if os.path.isdir(path) or os.path.realpath(path) in protected:
+                return True
+            for name in (META, RECORD, REGISTRY, AUDIT, TXN, LOCK):
+                try:  # also catches hard links to workspace files
+                    if os.path.samefile(path, ws.p(name)):
+                        return True
+                except OSError:
+                    pass
+            return False
+        if is_protected(out):
             raise WorkspaceError("refusing to write the page over %s (workspace data "
                                  "or a directory); choose another --out" % out)
         if not os.path.isdir(os.path.dirname(out)):

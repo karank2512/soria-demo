@@ -339,7 +339,7 @@ def record_problems(record):
                 problems.append("%s: as_of must be an ISO date" % where)
             src = m.get("source")
             st = src.get("type") if isinstance(src, dict) else None
-            if st not in AUTHORITY_RANK:
+            if not isinstance(st, str) or st not in AUTHORITY_RANK:
                 problems.append("%s: source.type must be one of %s"
                                 % (where, ", ".join(AUTHORITY_RANK)))
     return problems

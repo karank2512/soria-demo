@@ -105,6 +105,16 @@ class TestInit(WSBase):
         rc, _, err = run("init", a_file)
         self.assertEqual(rc, 2)
         self.assertIn("not a directory", err)
+        rc, _, err = run("init", os.path.join(a_file, "sub"))
+        self.assertEqual(rc, 2)
+        bad_src = os.path.join(self.tmp, "bad_src.json")
+        with open(bad_src, "w") as f:
+            json.dump({"entities": {"X": {"metrics": {"m": {
+                "value": 1, "unit": "u", "as_of": "2026-01-01",
+                "source": {"type": ["news"]}}}}}}, f)
+        rc, _, err = run("init", os.path.join(self.tmp, "w5"), "--record", bad_src)
+        self.assertEqual(rc, 2)
+        self.assertIn("source.type", err)
         for aliases in (None, "abc", [1]):
             reg = os.path.join(self.tmp, "reg.json")
             with open(reg, "w") as f:
@@ -269,6 +279,10 @@ class TestIngestAndQueue(WSBase):
             self.assertEqual(rc, 2, name)
             self.assertIn("refusing", err)
         rc, _, err = run("render", self.ws, "--out", self.ws)
+        self.assertEqual(rc, 2)
+        hard = os.path.join(self.tmp, "hard.html")
+        os.link(os.path.join(self.ws, "record.json"), hard)
+        rc, _, err = run("render", self.ws, "--out", hard)
         self.assertEqual(rc, 2)
         self.assertEqual(self.state(), before)
 
