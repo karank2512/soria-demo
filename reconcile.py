@@ -120,6 +120,34 @@ _NUMBER_RE = re.compile(r"(?<![\w.\-])-?\d[\d,]*(?:\.\d+)?(?![\d.]*-\d)")
 _GROUPED_RE = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 
 
+def value_spans(value, text):
+    """(start, end) offsets in text where the numeric value appears.
+
+    Same reading rules as value_in_source: properly grouped thousands
+    ("1,312,000") are one number; other comma runs are separate CSV cells.
+    """
+    if not isinstance(text, str):
+        return []
+    target = float(value)
+    spans = []
+    for m in _NUMBER_RE.finditer(text):
+        tok = m.group(0).rstrip(",")
+        if _GROUPED_RE.fullmatch(tok):
+            parts = [(0, len(tok), tok.replace(",", ""))]     # 1,312,000 -> 1312000
+        else:
+            parts, off = [], 0                                # CSV cells: 1312000,2026
+            for cell in tok.split(","):
+                parts.append((off, off + len(cell), cell))
+                off += len(cell) + 1
+        for a, b, reading in parts:
+            try:
+                if reading and float(reading) == target:
+                    spans.append((m.start() + a, m.start() + b))
+            except ValueError:
+                continue
+    return spans
+
+
 def value_in_source(value, text):
     """True if the numeric value appears literally in the source text.
 
@@ -128,22 +156,7 @@ def value_in_source(value, text):
     the extractor reports but the document never states is not verified. It
     does not prove the number sits at the cited locator.
     """
-    if not isinstance(text, str):
-        return False
-    target = float(value)
-    for tok in _NUMBER_RE.findall(text):
-        tok = tok.rstrip(",")
-        if _GROUPED_RE.fullmatch(tok):
-            readings = [tok.replace(",", "")]     # 1,312,000 -> 1312000
-        else:
-            readings = tok.split(",")             # CSV cells: 1312000,2026
-        for r in readings:
-            try:
-                if r and float(r) == target:
-                    return True
-            except ValueError:
-                continue
-    return False
+    return bool(value_spans(value, text))
 
 
 def resolve_entity(registry, name):
