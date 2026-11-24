@@ -1,11 +1,17 @@
-# Source-backed record reconciliation
+# Reconciliation Workbench
 
-A small working demo I built while applying to Soria: their core loop is
-turning messy source updates into a continuously updated, source-backed
-record, so I built a version of that loop for a fictional healthcare research
-team tracking three fictional companies. All data is synthetic.
+A local tool for keeping a source-backed record up to date. Extracted updates
+are applied, held for review, or rejected by deterministic rules; every value
+keeps its source and citation; and an analyst works through the holds in a
+small browser app, comparing each claim with its source text before accepting
+or dismissing it. Everything is written to an append-only audit log.
 
-![Review page](docs/review-screenshot.png)
+All bundled data is synthetic: a fictional research team ("Meridian Research")
+tracking three fictional companies. The project began as a work sample for a
+job application and is now developed as a standalone tool; it is not
+affiliated with or endorsed by any company.
+
+![Review app: a stale hold, with the explicit override](docs/app-screenshot.png)
 
 ## What it does
 
@@ -33,7 +39,7 @@ Requires Python 3.9+ (standard library only). The extraction steps need the
 `claude` CLI; everything else runs without it.
 
 ```
-python3 -m unittest -v                                  # 80 tests
+python3 -m unittest -v                                  # 113 tests
 python3 run_demo.py --mode mock --outdir out-demo       # no model calls
 open out-demo/review.html                               # the page above
 
@@ -41,7 +47,37 @@ python3 run_demo.py --mode claude --outdir out-demo     # real extraction
 python3 run_holdout.py --corpus corpus-dev-12-v2.json --mode claude --outdir out-dev
 ```
 
-## Review workflow (persistent local workspace)
+## Review app (local browser)
+
+```
+python3 app.py ws-demo --init        # creates ws-demo from the synthetic seed
+open http://127.0.0.1:8765/
+```
+
+1. **Import**: choose `demo-candidates.json`, the manifest
+   `demo_docs/manifest.json` and the six `demo_docs/*.txt` source files.
+   The queue then shows 2 applied, 2 held, 2 rejected.
+2. **Review**: each hold opens a side-by-side comparison of the current
+   record and every held update for that metric, with the claimed number
+   highlighted in its stored source text.
+3. **Resolve**: accept or dismiss with your name and a note. If the record
+   changed after the hold was raised, plain Accept is disabled; "Accept
+   anyway" needs a ticked confirmation and a note, and is marked as forced.
+4. **Refusals** (duplicate import, already resolved, stale accept, another
+   command holding the workspace) are explained on the page and change
+   nothing. A damaged audit log switches the app to read-only.
+
+The app keeps no state of its own: every request reads the workspace under
+its lock, so a restart loses nothing that was confirmed, and an interrupted
+change is completed (and announced) when the workspace is next opened. It
+binds to 127.0.0.1 only and checks Host, Origin and a per-process form token
+on every change. One request is served at a time; an upload whose body has
+not fully arrived within 10 seconds is abandoned. `python3 tools/browser_check.py NEW_FOLDER` runs the
+whole flow above in headless Chrome (desktop and 390px screenshots) and fails
+on any unmet step; it needs a local Chrome (default path is the macOS one; use
+`--chrome PATH` elsewhere) and writes only into NEW_FOLDER.
+
+## Review workflow (command line)
 
 `run_demo.py` is one-shot: every run starts again from the seed record.
 `workspace.py` keeps state on disk so holds can actually be worked through:
@@ -79,14 +115,15 @@ python3 workspace.py status ws-demo
   forward if interrupted; files are replaced atomically. Refused commands
   change nothing.
 
-This is a single-user local tool: no server, accounts, access control or
-tamper-proofing.
+The CLI and the app share the same workspace code. This is a single-user
+local tool: no accounts, access control or tamper-proofing.
 
 ## Test results (actual runs)
 
 | Suite | Result |
 | --- | --- |
-| Unit tests | 80/80 pass |
+| Unit tests | 113/113 pass |
+| Browser check (`tools/browser_check.py`, headless Chrome) | 12/12 workflow steps, plus a no-horizontal-overflow check at 1280px and 390px for each (36/36 checks) |
 | Dev set (12 cases, real extraction) | 12/12 decisions, 0 wrong auto-applies |
 | Frozen holdout (33 cases, run once after code freeze) | 33/33 decisions (14 applied / 14 held / 5 rejected), 0 wrong auto-applies |
 
@@ -95,7 +132,7 @@ state periods explicitly after dev testing showed two ambiguous cases.
 Same-author tests are not an independent benchmark, the cases use clearly
 stated periods and plain text, and performance on messy real inputs is
 untested. The graded 33-case holdout is kept out of this repo on purpose so
-future runs stay meaningful - happy to share it directly. Field-level note:
+future runs stay meaningful. Field-level note:
 one scorer field (entity) disagreed on the unknown-entity case, which was
 still correctly rejected; decision-level results were unaffected.
 
@@ -107,14 +144,16 @@ rule-pack.md          the SOP in plain English
 extract_candidate.py  LLM extractor wrapper (claude CLI)
 run_holdout.py        corpus harness + scorer
 run_demo.py           end-to-end demo runner (one-shot)
-workspace.py          persistent review workspace: ingest, queue, resolve, render
-review_page.py        renders the review surface (HTML)
-test_*.py             unit tests (engine, review page, workspace)
+workspace.py          persistent review workspace (library + CLI)
+app.py                local browser app over a workspace
+review_page.py        renders the static review report (HTML)
+test_*.py             tests (engine, review page, workspace, app over HTTP)
+tools/browser_check.py  end-to-end check in headless Chrome
 record.json           seed record (synthetic)
 registry.json         entity registry with aliases
 corpus-dev-12-v2.json dev test set (same-author)
 demo_docs/            six curated synthetic source updates
-docs/                 write-up and screenshot
+docs/                 original write-up and screenshots
 ```
 
 ## Provenance
@@ -142,7 +181,8 @@ describes the evaluated version.
   formats, or live feeds.
 - Entity resolution is a small alias registry, nothing more.
 - The audit log is append-only; it is not tamper-proof.
-- The workspace is single-user and local; no concurrent multi-user editing.
+- The workspace and app are single-user and local; no accounts or
+  concurrent multi-user editing.
 - The value-in-source check matches numbers literally (e.g. `$2.15 billion`
   will not match `2150`); such values are held for review, not applied.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soria demo: extractor wrapper around the claude CLI (no API keys).
+"""Reconciliation Workbench: extractor wrapper around the claude CLI (no API keys).
 
 Reads ONE synthetic source document, asks the model for a structured candidate
 update, validates the schema, and writes candidate JSON. The extractor never

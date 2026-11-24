@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Soria demo: render the analyst review surface as a self-contained HTML page.
+"""Reconciliation Workbench: render the analyst review surface as a self-contained HTML page.
 
 Inputs: updated record.json + audit.jsonl (both produced by reconcile.py).
 Output: review.html - everything held for a person first (source conflicts
@@ -285,21 +285,8 @@ h3.sub{font-size:13px;font-weight:600;color:var(--ink2);margin:24px 0 2px}
 """
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--record", required=True)
-    ap.add_argument("--audit", required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args(argv)
-
-    record = load_json(args.record)
-    audit = []
-    with open(args.audit, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                audit.append(json.loads(line))
-
+def render_html(record, audit):
+    """The full review page for a record + audit log, as an HTML string."""
     # Analyst resolutions (written by workspace.py) close holds; engine
     # decisions are everything else. Logs from reconcile.py alone have none.
     resolutions = [a for a in audit if a.get("type") == "resolution"]
@@ -502,8 +489,27 @@ def main(argv=None):
              'real spreadsheets and live feeds are not implemented.</p>')
     p.append("</div></body></html>")
 
+    return "\n".join(p) + "\n"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--record", required=True)
+    ap.add_argument("--audit", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args(argv)
+
+    record = load_json(args.record)
+    audit = []
+    with open(args.audit, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                audit.append(json.loads(line))
+
+    page = render_html(record, audit)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write("\n".join(p) + "\n")
+        f.write(page)
     print("wrote %s (%d audit entries)" % (args.out, len(audit)))
     return 0
 

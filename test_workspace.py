@@ -7,7 +7,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import tempfile
 import unittest
 
@@ -45,8 +44,9 @@ class WSBase(unittest.TestCase):
         rc, _, err = run("init", self.ws, "--record", SEED_RECORD, "--registry", REGISTRY)
         self.assertEqual(rc, 0, err)
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp)
+    # No tearDown: test workspaces are kept for inspection, never deleted.
+    # Run the suite with TMPDIR pointing at a scratch folder to keep them
+    # out of the system temp directory.
 
     def write_cands(self, cands, name="c.json"):
         path = os.path.join(self.tmp, name)
