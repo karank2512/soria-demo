@@ -447,14 +447,20 @@ class TestConnectionHandling(AppBase):
         stop = threading.Event()
 
         def trickle():
-            for b in b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: " + b"a" * 200:
+            # Request line at once, then one header byte at a time: the header
+            # phase itself must be bounded in total, not per line or per read.
+            try:
+                s.sendall(b"GET / HTTP/1.1\r\n")
+            except OSError:
+                return
+            for b in b"Host: 127.0.0.1\r\nX-Slow: " + b"a" * 200:
                 if stop.is_set():
                     return
                 try:
                     s.sendall(bytes([b]))
                 except OSError:
                     return
-                time.sleep(0.2)
+                time.sleep(0.05)
         t = threading.Thread(target=trickle, daemon=True)
         t.start()
         time.sleep(0.3)
@@ -489,7 +495,31 @@ class TestConnectionHandling(AppBase):
         self.assertEqual(status, 200)
         log = err.getvalue()
         self.assertNotIn("Traceback", log)
-        self.assertNotIn("took longer than", log)
+        self.assertNotIn(" 408 ", log)     # not mislabelled as a timeout
+        self.assertNotIn(" 500 ", log)
+        self.assertIn("connection dropped by client", log)
+
+    def test_client_vanishing_mid_reply_logs_one_line(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(20):
+                s = socket.create_connection(("127.0.0.1", self.server.port))
+                try:
+                    s.sendall(("GET /report HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n"
+                               % self.server.port).encode())
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                 struct.pack("ii", 1, 0))
+                except OSError:
+                    pass  # the client side of a burst may itself be reset; not under test
+                s.close()
+                time.sleep(0.02)
+            time.sleep(0.5)
+            status, _, _ = self.server.get("/")
+        self.assertEqual(status, 200)
+        log = err.getvalue()
+        self.assertNotIn("Traceback", log)
+        self.assertNotIn("unexpected error", log)
+        self.assertNotIn(" 500 ", log)
 
     def test_recovery_listeners_do_not_accumulate(self):
         n = len(workspace.RECOVERY_LISTENERS)

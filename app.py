@@ -554,7 +554,9 @@ def make_handler(app):
         # The socket timeout applies per read, so a client trickling header
         # bytes could otherwise hold this single-threaded server. A timer shuts
         # the connection if the request line and headers are not complete in
-        # time; an idle keep-alive connection is closed the same way.
+        # time; an idle connection is closed the same way. Each connection is
+        # bounded this way, but requests are served one at a time, so several
+        # slow connections can still queue a request behind each other.
         def handle_one_request(self):
             self._head_lock = threading.Lock()
             self._head_done = False
@@ -666,6 +668,8 @@ def make_handler(app):
                 raise Refusal("There is no page at %s." % path, "not_found_page")
             except (WorkspaceError, Refusal) as e:
                 return self.fail(e)
+            except ConnectionError:
+                raise  # client went away: handled (one log line) in handle_one_request
             except Exception as e:  # never show a traceback to the browser
                 self.log_message("unexpected error: %r", e)
                 return self.fail(Refusal("Unexpected error; nothing was changed.", "error"))
@@ -755,6 +759,8 @@ def make_handler(app):
                     result = do_import(app, data)
                 except (WorkspaceError, Refusal) as e:
                     return self.fail_json(e)
+                except ConnectionError:
+                    raise
                 except Exception as e:
                     self.log_message("unexpected error: %r", e)
                     return self.fail_json(Refusal("Unexpected error; nothing was changed.",
@@ -777,6 +783,8 @@ def make_handler(app):
                                          page_hold(app, state, hid, {}, error=e))
                     except (WorkspaceError, Refusal):
                         return self.fail(e, back)
+                except ConnectionError:
+                    raise
                 except Exception as e:
                     self.log_message("unexpected error: %r", e)
                     return self.fail(Refusal("Unexpected error; nothing was changed.",
