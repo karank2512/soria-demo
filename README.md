@@ -39,7 +39,7 @@ Requires Python 3.9+ (standard library only). The extraction steps need the
 `claude` CLI; everything else runs without it.
 
 ```
-python3 -m unittest -v                                  # 113 tests
+python3 -m unittest -v                                  # 124 tests
 python3 run_demo.py --mode mock --outdir out-demo       # no model calls
 open out-demo/review.html                               # the page above
 
@@ -71,8 +71,12 @@ The app keeps no state of its own: every request reads the workspace under
 its lock, so a restart loses nothing that was confirmed, and an interrupted
 change is completed (and announced) when the workspace is next opened. It
 binds to 127.0.0.1 only and checks Host, Origin and a per-process form token
-on every change. One request is served at a time; an upload whose body has
-not fully arrived within 10 seconds is abandoned. `python3 tools/browser_check.py NEW_FOLDER` runs the
+on every change. One request is served at a time. A connection whose request
+line and headers, or whose body, have not fully arrived within 10 seconds
+each is closed, so a single slow or idle client holds the app for at most
+about 10 seconds; several such connections can still queue requests behind
+each other.
+`python3 tools/browser_check.py NEW_FOLDER` runs the
 whole flow above in headless Chrome (desktop and 390px screenshots) and fails
 on any unmet step; it needs a local Chrome (default path is the macOS one; use
 `--chrome PATH` elsewhere) and writes only into NEW_FOLDER.
@@ -114,6 +118,18 @@ python3 workspace.py status ws-demo
 - One writer at a time (lock file); each change is journaled and rolled
   forward if interrupted; files are replaced atomically. Refused commands
   change nothing.
+- Before a journal is rolled forward it is checked for consistency with the
+  workspace: its sha256 must match its content, its metadata must belong to
+  this workspace and only move forward (counters, append-only import
+  history), its entries must be well-formed with exactly the next ids, and a
+  resolution must resolve an open hold. A journal that fails is reported as
+  damaged (the app goes read-only) and left untouched for inspection. These
+  checks catch damage and mismatches; they do not stop someone who edits the
+  files deliberately (the workspace is not tamper-proof).
+- Journals written before these checks existed have no checksum and are
+  reported as damaged. If one is left by a crash during an upgrade, finish it
+  with the previous version of `workspace.py` (any command completes it),
+  then continue with this one.
 
 The CLI and the app share the same workspace code. This is a single-user
 local tool: no accounts, access control or tamper-proofing.
@@ -122,7 +138,7 @@ local tool: no accounts, access control or tamper-proofing.
 
 | Suite | Result |
 | --- | --- |
-| Unit tests | 113/113 pass |
+| Unit tests | 124/124 pass |
 | Browser check (`tools/browser_check.py`, headless Chrome) | 12/12 workflow steps, plus a no-horizontal-overflow check at 1280px and 390px for each (36/36 checks) |
 | Dev set (12 cases, real extraction) | 12/12 decisions, 0 wrong auto-applies |
 | Frozen holdout (33 cases, run once after code freeze) | 33/33 decisions (14 applied / 14 held / 5 rejected), 0 wrong auto-applies |

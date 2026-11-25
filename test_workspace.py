@@ -27,6 +27,12 @@ def run(*argv):
     return rc, out.getvalue(), err.getvalue()
 
 
+def journal(audit, record, meta):
+    """A journal as the workspace writes it (with its checksum)."""
+    return {"audit": audit, "record": record, "meta": meta,
+            "sha256": workspace.journal_digest(audit, record, meta)}
+
+
 def cand(**kw):
     base = {"entity": "Halcyon Health", "metric": "ma_enrollment", "value": 1300000,
             "unit": "members", "period": "2026-Q3", "pub_date": "2026-10-01",
@@ -377,6 +383,153 @@ class TestResolve(WSBase):
         self.assertNotIn("—", page)
 
 
+class TestJournalValidation(WSBase):
+    """A journal is only rolled forward if it is exactly what commit() writes."""
+
+    def setUp(self):
+        super().setUp()
+        self.ingest_demo()
+        ws = workspace.Workspace(self.ws)
+        self.meta = ws.meta()
+        self.record = ws.record()
+
+    def good(self):
+        """A sound journal: resolve D-2 (one resolution, record updated)."""
+        meta = dict(self.meta, next_resolution=self.meta["next_resolution"] + 1)
+        record = json.loads(json.dumps(self.record))
+        record["entities"]["Halcyon Health"]["metrics"]["mlr_pct"]["value"] = 85.0
+        entry = {"id": "R-1", "type": "resolution", "resolves": "D-2", "action": "accept",
+                 "reviewer": "a", "note": ""}
+        return [entry], record, meta
+
+    def plant(self, txn):
+        with open(os.path.join(self.ws, "txn.json"), "w") as f:
+            f.write(txn if isinstance(txn, str) else json.dumps(txn))
+
+    def assertRefused(self, txn, why):
+        self.plant(txn)
+        before = self.state()
+        rc, _, err = run("status", self.ws)
+        self.assertEqual(rc, 2, why)
+        self.assertIn("change journal", err, why)
+        self.assertEqual(self.state(), before, why)
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "txn.json")), why)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, ".lock")), why)
+
+    def test_hand_made_journals_refused(self):
+        audit, record, meta = self.good()
+        bad_ids = [dict(audit[0], id="R-7")]
+        jumped = dict(meta, ingests=meta["ingests"] + [{}, {}])
+        broken_record = json.loads(json.dumps(record))
+        del broken_record["entities"]["Halcyon Health"]["metrics"]["mlr_pct"]["as_of"]
+        cases = [
+            ({"audit": [], "meta": {}}, "no checksum, empty meta"),
+            (journal([], None, {}), "checksum ok, empty meta"),
+            (journal([{"id": "Z-9"}], None, {"schema": 1}), "junk id, partial meta"),
+            (journal(audit, record, dict(meta, schema=2)), "wrong schema"),
+            (journal(audit, record, {k: v for k, v in meta.items() if k != "ingests"}),
+             "missing ingests"),
+            (journal(audit, record, dict(meta, next_decision="7")), "non-integer counter"),
+            (dict(journal(audit, record, meta), sha256="0" * 64), "checksum mismatch"),
+            (dict(journal(audit, record, meta), record=self.record), "content edited after"),
+            (journal(bad_ids, record, meta), "ids not the next ones"),
+            (journal(audit + audit, record, meta), "duplicate id"),
+            (journal(audit, broken_record, meta), "record invalid"),
+            (journal(audit, record, jumped), "import history jumps"),
+        ]
+        for txn, why in cases:
+            self.assertRefused(txn, why)
+
+    def test_sound_journal_applies(self):
+        self.plant(journal(*self.good()))
+        rc, _, err = run("status", self.ws)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.record_value("Halcyon Health", "mlr_pct")["value"], 85.0)
+        self.assertEqual(self.audit()[-1]["id"], "R-1")
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "txn.json")))
+
+    def test_journal_applied_up_to_metadata_is_finished(self):
+        # Crash after the metadata was replaced, before the journal was removed.
+        audit, record, meta = self.good()
+        self.plant(journal(audit, record, meta))
+        ws = workspace.Workspace(self.ws)
+        # Real order: audit appended, then record replaced, then metadata.
+        with open(os.path.join(self.ws, "audit.jsonl"), "a") as f:
+            f.write(json.dumps(audit[0]) + "\n")
+        with open(os.path.join(self.ws, "record.json"), "w") as f:
+            json.dump(record, f)
+        with open(os.path.join(self.ws, "workspace.json"), "w") as f:
+            json.dump(meta, f)
+        rc, _, err = run("status", self.ws)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([e["id"] for e in ws.audit()].count("R-1"), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "txn.json")))
+
+    def test_applied_shortcut_cannot_add_entries_or_change_record(self):
+        meta = self.meta  # equal to the current metadata: "already applied"
+        altered = json.loads(json.dumps(self.record))
+        altered["entities"]["Halcyon Health"]["metrics"]["mlr_pct"]["value"] = 99.0
+        forged = {"id": "R-1", "type": "resolution", "resolves": "D-2", "action": "accept"}
+        for txn, why in [(journal([], altered, meta), "record swapped"),
+                         (journal([forged], None, meta), "new entry"),
+                         (journal([{"id": "X-1"}], None, meta), "junk id"),
+                         (journal([{"noid": 1}], None, meta), "entry without id"),
+                         (journal([5], None, meta), "entry not an object")]:
+            self.assertRefused(txn, why)
+
+    def test_counters_cannot_go_backwards_and_meta_must_match(self):
+        m = self.meta
+        cases = [
+            (journal([], None, dict(m, next_decision=1, next_resolution=1)), "backwards"),
+            (journal([], None, dict(m, created="2000-01-01T00:00:00")), "other workspace"),
+            (journal([], None, dict(m, extra=1)), "extra meta key"),
+            (journal([], None, dict(m, ingests=[dict(i, file="forged.json")
+                                                for i in m["ingests"]])), "history rewritten"),
+            (journal([{"id": "R-1"}], None, dict(m, next_resolution=2)), "bare resolution"),
+            (journal([{"id": "R-1", "type": "resolution", "resolves": "D-1",
+                       "action": "accept"}], None, dict(m, next_resolution=2)),
+             "resolves an applied decision"),
+        ]
+        for txn, why in cases:
+            self.assertRefused(txn, why)
+
+    def crash_first_roll_forward(self, action):
+        """Run action with the first roll-forward failing right after the journal
+        is written (as a crash would), then recover with a normal command."""
+        orig = workspace.Workspace._roll_forward
+        calls = []
+
+        def crash_once(ws_self, txn):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt("simulated crash after the journal was written")
+            return orig(ws_self, txn)
+        workspace.Workspace._roll_forward = crash_once
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                action()
+        finally:
+            workspace.Workspace._roll_forward = orig
+        self.assertTrue(os.path.exists(os.path.join(self.ws, "txn.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.ws, ".lock")))
+        rc, _, err = run("status", self.ws)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "txn.json")))
+
+    def test_real_commit_interrupted_then_recovered(self):
+        # Journals written by the real commit() pass validation on recovery.
+        self.crash_first_roll_forward(
+            lambda: workspace.resolve(self.ws, "D-2", "accept", "a", "n"))
+        self.assertEqual(self.record_value("Halcyon Health", "mlr_pct")["value"], 85.0)
+        self.assertEqual([e["id"] for e in self.audit()].count("R-1"), 1)
+        raw = json.dumps([cand(batch="b9", value=1312000, pub_date="2026-11-01")]).encode()
+        self.crash_first_roll_forward(
+            lambda: workspace.ingest(self.ws, raw, "c9.json"))
+        ids = [e["id"] for e in self.audit()]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids[-1], "D-7")
+
+
 class TestDurability(WSBase):
     def test_lock_blocks_concurrent_writer_and_is_released(self):
         with workspace.Workspace(self.ws):
@@ -396,9 +549,11 @@ class TestDurability(WSBase):
         record = ws.record()
         record["entities"]["Halcyon Health"]["metrics"]["ma_enrollment"]["value"] = 1300000
         meta["next_decision"] = 3
+        meta["ingests"] = meta["ingests"] + [{"ts": "t", "file": "c.json", "sha256": "x",
+                                              "batches": ["b1"], "decisions": 2}]
         lines = [{"id": "D-1", "decision": "apply"}, {"id": "D-2", "decision": "hold"}]
         with open(os.path.join(self.ws, "txn.json"), "w") as f:
-            json.dump({"audit": lines, "record": record, "meta": meta}, f)
+            json.dump(journal(lines, record, meta), f)
         with open(os.path.join(self.ws, "audit.jsonl"), "a") as f:
             f.write(json.dumps(lines[0]) + "\n")
         rc, out, _ = run("status", self.ws)
@@ -412,14 +567,22 @@ class TestDurability(WSBase):
         ws = workspace.Workspace(self.ws)
         lines = [{"id": "D-1", "decision": "apply"}, {"id": "D-2", "decision": "hold"}]
         meta = dict(ws.meta(), next_decision=3)
+        meta["ingests"] = meta["ingests"] + [{"ts": "t", "file": "c.json", "sha256": "x",
+                                              "batches": ["b1"], "decisions": 2}]
+        with open(os.path.join(self.ws, "workspace.json")) as f:
+            meta_before = f.read()
         with open(os.path.join(self.ws, "txn.json"), "w") as f:
-            json.dump({"audit": lines, "record": None, "meta": meta}, f)
+            json.dump(journal(lines, None, meta), f)
         for torn in (json.dumps(lines[0])[:10], json.dumps(lines[0])):  # half line; no newline
+            # Real order: the audit append precedes the metadata replace, so a
+            # torn audit tail always comes with the old metadata.
+            with open(os.path.join(self.ws, "workspace.json"), "w") as f:
+                f.write(meta_before)
             with open(os.path.join(self.ws, "audit.jsonl"), "w") as f:
                 f.write(torn)
             if not os.path.exists(os.path.join(self.ws, "txn.json")):
                 with open(os.path.join(self.ws, "txn.json"), "w") as f:
-                    json.dump({"audit": lines, "record": None, "meta": meta}, f)
+                    json.dump(journal(lines, None, meta), f)
             rc, _, err = run("status", self.ws)
             self.assertEqual(rc, 0, err)
             self.assertEqual([e["id"] for e in self.audit()], ["D-1", "D-2"])

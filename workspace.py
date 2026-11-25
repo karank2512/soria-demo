@@ -42,6 +42,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,14 +125,100 @@ validate_registry = reconcile.registry_problems
 RECOVERY_LISTENERS = []
 
 
-def _journal_shape_ok(txn):
-    if not isinstance(txn, dict) or not isinstance(txn.get("meta"), dict):
-        return False
-    audit = txn.get("audit")
-    if not isinstance(audit, list) or not all(
-            isinstance(e, dict) and isinstance(e.get("id"), str) for e in audit):
-        return False
-    return txn.get("record") is None or isinstance(txn.get("record"), dict)
+_ID_RE = re.compile(r"([DR])-([1-9][0-9]*)")
+META_KEYS = ("schema", "created", "next_decision", "next_resolution", "ingests")
+
+
+def journal_digest(audit, record, meta):
+    """sha256 over a journal's canonical content; stored in the journal."""
+    body = reconcile.dumps_safe({"audit": audit, "record": record, "meta": meta},
+                                sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def journal_problem(txn, current_meta, current_audit, current_record):
+    """Why a journal must not be rolled forward, or None if it is sound.
+
+    These checks refuse a journal that is damaged or does not follow on from
+    this workspace. They are consistency checks, not a defence against
+    deliberate forgery (anyone can recompute a sha256; the workspace is not
+    tamper-proof). A journal is sound only if all of the following hold:
+    - exactly the fields commit() writes, with a matching sha256;
+    - complete schema-1 metadata for this workspace (same "created"),
+      counters that do not go backwards, and an import history that only
+      grows by appending at most one entry;
+    - a valid record, when it carries one;
+    - well-formed entries whose ids are exactly the next D-/R- ids, where
+      each resolution resolves an open hold of this workspace.
+    A journal already applied up to its metadata (crash just before its
+    removal) is sound only if all its entries are already in the audit log
+    and its record is the current one.
+    """
+    if not isinstance(txn, dict) or set(txn) != {"audit", "record", "meta", "sha256"}:
+        return "not a journal written by this tool"
+    audit, record, meta = txn["audit"], txn["record"], txn["meta"]
+    if not isinstance(audit, list) or not isinstance(meta, dict) or \
+            not (record is None or isinstance(record, dict)):
+        return "audit must be a list, meta an object, record an object or null"
+    if not isinstance(txn["sha256"], str) or \
+            txn["sha256"] != journal_digest(audit, record, meta):
+        return "checksum missing or does not match its content"
+    if set(meta) != set(META_KEYS) or meta["schema"] != SCHEMA:
+        return "metadata is incomplete or has the wrong schema"
+    nd, nr = meta["next_decision"], meta["next_resolution"]
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 1 for v in (nd, nr)) \
+            or not isinstance(meta["ingests"], list):
+        return "metadata counters are invalid"
+    if meta["created"] != current_meta.get("created"):
+        return "metadata belongs to a different workspace"
+    cur_ing = current_meta.get("ingests", [])
+    if meta["ingests"][:len(cur_ing)] != cur_ing or \
+            len(meta["ingests"]) - len(cur_ing) not in (0, 1):
+        return "import history does not follow on from this workspace"
+    if record is not None and reconcile.record_problems(record):
+        return "record is not valid"
+
+    ids = []
+    for e in audit:
+        if not isinstance(e, dict) or not isinstance(e.get("id"), str) or \
+                not _ID_RE.fullmatch(e["id"]):
+            return "audit entry with an invalid id"
+        if e["id"][0] == "D" and e.get("decision") not in ("apply", "hold", "reject"):
+            return "decision entry %s is incomplete" % e["id"]
+        if e["id"][0] == "R" and (e.get("type") != "resolution"
+                                  or e.get("action") not in ("accept", "dismiss")
+                                  or not isinstance(e.get("resolves"), str)):
+            return "resolution entry %s is incomplete" % e["id"]
+        ids.append(e["id"])
+    if len(set(ids)) != len(ids):
+        return "audit entries repeat an id"
+
+    present = {e.get("id") for e in current_audit}
+    if meta == current_meta:
+        # Applied up to the metadata already: nothing may be new.
+        if any(i not in present for i in ids):
+            return "entries missing although the metadata was already applied"
+        if record is not None and record != current_record:
+            return "record differs from the one already applied"
+        return None
+
+    cd, cr = current_meta.get("next_decision"), current_meta.get("next_resolution")
+    if nd < cd or nr < cr:
+        return "counters go backwards"
+    got_d = sorted(int(i[2:]) for i in ids if i[0] == "D")
+    got_r = sorted(int(i[2:]) for i in ids if i[0] == "R")
+    if got_d != list(range(cd, nd)) or got_r != list(range(cr, nr)):
+        return "audit ids do not match the next ids of this workspace"
+    grew = len(meta["ingests"]) - len(cur_ing)
+    if (got_r and (got_d or grew)) or (got_d and not grew):
+        return "a change is either one import or one resolution"
+    holds = {e.get("id") for e in current_audit if e.get("decision") == "hold"}
+    resolved = {e.get("resolves") for e in current_audit if e.get("type") == "resolution"}
+    for e in audit:
+        if e["id"][0] == "R" and e["id"] not in present and (
+                e["resolves"] not in holds or e["resolves"] in resolved):
+            return "resolution %s does not resolve an open hold" % e["id"]
+    return None
 
 
 class Workspace:
@@ -184,12 +271,39 @@ class Workspace:
             raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
                                  "changed. Inspect it before using this workspace."
                                  % (self.p(TXN), e), "corrupt_journal")
-        if not _journal_shape_ok(txn):
-            raise WorkspaceError("the change journal %s is damaged (unexpected contents); "
-                                 "nothing was changed. Inspect it before using this "
-                                 "workspace." % self.p(TXN), "corrupt_journal")
+        problem = journal_problem(txn, _load_json(self.p(META), "workspace metadata"),
+                                  self._complete_audit_entries(),
+                                  _load_json(self.p(RECORD), "record"))
+        if problem:
+            raise WorkspaceError("the change journal %s is damaged (%s); nothing was "
+                                 "changed. Inspect it before using this workspace."
+                                 % (self.p(TXN), problem), "corrupt_journal")
         self._roll_forward(txn)
         return True
+
+    def _complete_audit_entries(self):
+        """Audit entries on complete lines, ignoring a torn final line.
+
+        Used to validate a journal before anything is written: the torn line
+        is the one the journal's own append was writing, and is repaired only
+        once the journal has been accepted.
+        """
+        try:
+            with open(self.p(AUDIT), "rb") as f:
+                data = f.read()
+        except FileNotFoundError:
+            return []
+        if data and not data.endswith(b"\n"):
+            data = data[:data.rfind(b"\n") + 1]
+        entries = []
+        for n, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    raise WorkspaceError("audit log line %d is not valid JSON: %s"
+                                         % (n, self.p(AUDIT)), "corrupt_audit")
+        return entries
 
     def _repair_audit_tail(self):
         """Drop a torn final audit line left by an interrupted append.
@@ -231,7 +345,8 @@ class Workspace:
         """Journal the change, then apply it. record=None leaves it unchanged."""
         if not self._locked:
             raise RuntimeError("commit outside lock")
-        txn = {"audit": audit_entries, "record": record, "meta": meta}
+        txn = {"audit": audit_entries, "record": record, "meta": meta,
+               "sha256": journal_digest(audit_entries, record, meta)}
         _atomic_write(self.p(TXN), reconcile.dumps_safe(txn) + "\n")
         self._roll_forward(txn)
 
