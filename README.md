@@ -35,7 +35,7 @@ writing a bad value into the record.
 
 ## Quickstart
 
-Requires Python 3.9+ (standard library only). The extraction steps need the
+Requires Python 3.11+ (standard library only). The extraction steps need the
 `claude` CLI; everything else runs without it.
 
 ```
