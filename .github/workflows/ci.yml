@@ -87,8 +87,10 @@ jobs:
           python workspace.py ingest "$W" --candidates demo-candidates.json \
             --manifest demo_docs/manifest.json
           python workspace.py resolve "$W" D-2 --accept --reviewer ci --note "ci run"
-          if python workspace.py resolve "$W" D-3 --accept --reviewer ci; then
-            echo "stale accept should have been refused"; exit 1
+          rc=0
+          python workspace.py resolve "$W" D-3 --accept --reviewer ci || rc=$?
+          if [ "$rc" -ne 2 ]; then
+            echo "stale accept should exit 2 (refusal); got $rc"; exit 1
           fi
           python workspace.py resolve "$W" D-3 --dismiss --reviewer ci
           python workspace.py status "$W" | tee "$RUNNER_TEMP/status.json"
