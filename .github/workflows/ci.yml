@@ -101,15 +101,15 @@ jobs:
           EOF
 
   browser:
-    # Optional smoke test. ubuntu-24.04 runner images include Google Chrome,
-    # but headless Chrome's sandbox can be blocked on that image; until this
-    # job is seen passing on the hosted runner it does not gate the PR.
-    # Results stay in the job log (browser_check prints every step and the
-    # totals); screenshots are listed, not uploaded.
-    name: browser smoke test (headless Chrome, optional)
+    # Smoke test for the review page in headless Chrome; it gates PRs. It has
+    # passed on the hosted runner, and the Locate Chrome step fails the job if
+    # Chrome is absent rather than skipping the check silently. ubuntu-24.04
+    # runner images ship Google Chrome. Results stay in the job log
+    # (browser_check prints every step and the totals); screenshots are
+    # listed, not uploaded.
+    name: browser smoke test (headless Chrome)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,14 +121,14 @@ jobs:
         id: chrome
         run: |
           C="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [ -z "$C" ]; then echo "Chrome not found on runner"; exit 1; fi
           echo "path=$C" >> "$GITHUB_OUTPUT"
-          if [ -z "$C" ]; then echo "Chrome not found on runner; skipping"; else "$C" --version; fi
+          "$C" --version
       - name: Browser check (import -> review -> resolve -> restart)
-        if: steps.chrome.outputs.path != ''
         run: |
           export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
           python tools/browser_check.py "$RUNNER_TEMP/browser" \
             --chrome "${{ steps.chrome.outputs.path }}"
       - name: List screenshots (kept on the runner only)
-        if: always() && steps.chrome.outputs.path != ''
+        if: always()
         run: ls -l "$RUNNER_TEMP/browser/shots" || echo "no screenshots were written"
