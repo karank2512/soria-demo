@@ -36,6 +36,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Compile all Python files
+        run: python -m py_compile *.py tools/*.py
+
       - name: Unit tests
         run: |
           export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
