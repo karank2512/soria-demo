@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconciliation Workbench: deterministic source-reconciliation engine (stdlib only, Python 3.9+).
+"""Reconciliation Workbench: deterministic source-reconciliation engine (stdlib only, Python 3.11+).
 
 Reads a record file and candidate updates (JSON), applies the Meridian Research
 SOP (rule-pack.md) mechanically, and emits decisions, an audit log and an

@@ -1,0 +1,139 @@
+# Checks for the Reconciliation Workbench. Standard library only: nothing is
+# installed beyond the pinned Python. Synthetic data only; no secrets used.
+name: ci
+
+on:
+  pull_request:
+    branches: [main, redesign/review-surface]
+  push:
+    branches: [main, redesign/review-surface]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  tests:
+    name: unit tests + CLI checks (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the minimum the README claims; 3.13 is tested.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Compile all Python files
+        run: python -m py_compile *.py tools/*.py
+
+      - name: Unit tests
+        run: |
+          export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
+          python -m unittest -v
+
+      - name: Dev corpus, mock extraction (12/12, no wrong auto-applies)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
+          python run_holdout.py --corpus corpus-dev-12-v2.json --mode mock \
+            --outdir "$RUNNER_TEMP/dev"
+          python - "$RUNNER_TEMP/dev/results.json" <<'EOF'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print({k: r[k] for k in ("decisions_correct", "decisions_wrong",
+                                   "wrong_auto_apply_count")})
+          assert r["decisions_correct"] == 12, r["decisions_correct"]
+          assert r["decisions_wrong"] == 0, r["decisions_wrong"]
+          assert r["wrong_auto_apply_count"] == 0, r["wrong_auto_apply_count"]
+          EOF
+
+      - name: Demo run, mock extraction (known decisions)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
+          python run_demo.py --mode mock --outdir "$RUNNER_TEMP/demo"
+          python - "$RUNNER_TEMP/demo/audit.jsonl" <<'EOF'
+          import json, sys
+          got = {}
+          for line in open(sys.argv[1]):
+              e = json.loads(line)
+              got[e["source_id"]] = (e["decision"], e["reason_code"])
+          want = {
+              "SRC-GOV-DEMO1": ("apply", "authoritative_newer_consistent"),
+              "SRC-GOV-DEMO2": ("hold", "conflicting_sources"),
+              "SRC-NEWS-DEMO3": ("hold", "conflicting_sources"),
+              "SRC-NEWS-DEMO4": ("apply", "new_coverage"),
+              "SRC-CO-DEMO5": ("reject", "missing_citation"),
+              "SRC-NEWS-DEMO6": ("reject", "unknown_entity"),
+          }
+          for k in sorted(want):
+              print(k, got.get(k))
+          assert got == want, got
+          EOF
+
+      - name: Workspace CLI walkthrough (README)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
+          W="$RUNNER_TEMP/ws"
+          python workspace.py init "$W"
+          python workspace.py ingest "$W" --candidates demo-candidates.json \
+            --manifest demo_docs/manifest.json
+          python workspace.py resolve "$W" D-2 --accept --reviewer ci --note "ci run"
+          rc=0
+          python workspace.py resolve "$W" D-3 --accept --reviewer ci || rc=$?
+          if [ "$rc" -ne 2 ]; then
+            echo "stale accept should exit 2 (refusal); got $rc"; exit 1
+          fi
+          python workspace.py resolve "$W" D-3 --dismiss --reviewer ci
+          python workspace.py status "$W" | tee "$RUNNER_TEMP/status.json"
+          python - "$RUNNER_TEMP/status.json" <<'EOF'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          assert s["decisions"] == {"apply": 2, "hold": 2, "reject": 2}, s
+          assert s["resolutions"] == {"accepted": 1, "dismissed": 1}, s
+          assert s["open_holds"] == 0, s
+          EOF
+
+  browser:
+    # Smoke test for the review page in headless Chrome; it gates PRs. It has
+    # passed on the hosted runner, and the Locate Chrome step fails the job if
+    # Chrome is absent rather than skipping the check silently. ubuntu-24.04
+    # runner images ship Google Chrome. Results stay in the job log
+    # (browser_check prints every step and the totals); screenshots are
+    # listed, not uploaded.
+    name: browser smoke test (headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Locate Chrome
+        id: chrome
+        run: |
+          C="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [ -z "$C" ]; then echo "Chrome not found on runner"; exit 1; fi
+          echo "path=$C" >> "$GITHUB_OUTPUT"
+          "$C" --version
+      - name: Browser check (import -> review -> resolve -> restart)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/tmp" && mkdir -p "$TMPDIR"
+          python tools/browser_check.py "$RUNNER_TEMP/browser" \
+            --chrome "${{ steps.chrome.outputs.path }}"
+      - name: List screenshots (kept on the runner only)
+        if: always()
+        run: ls -l "$RUNNER_TEMP/browser/shots" || echo "no screenshots were written"
